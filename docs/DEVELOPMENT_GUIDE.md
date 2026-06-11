@@ -218,20 +218,37 @@ consumer, чтобы событие было прочитано повторно
 ### 3.1. Направление зависимостей
 
 ```text
-interfaces ─────┐
-                ├──→ application ──→ domain
-infrastructure ─┘
-
-bootstrap связывает внешние слои между собой
+run
+ ↓
+config/container
+ ↓
+interfaces + infrastructure
+ ↓
+application
+ ↓
+core
 ```
+
+Эта схема продолжает подход из `test_psek`:
+
+- `core` содержит независимые domain-модели;
+- `application` содержит DTO, use cases и порты нужных им внешних действий;
+- `infrastructure` реализует application-порты;
+- `interfaces` принимает внешние Kafka/Celery-сообщения;
+- `config` содержит settings и собирает зависимости;
+- `run` содержит запускаемые процессы.
 
 Внутренние слои не импортируют внешние:
 
-- `domain` не знает про Pydantic, Kafka, Celery, RabbitMQ и Jinja;
+- `core` не знает про Pydantic, Kafka, Celery, RabbitMQ и Jinja;
 - `application` не знает про `AIOKafkaConsumer`, `Celery` и конкретный sender;
-- `interfaces` переводит внешние сообщения во внутренние команды;
-- `infrastructure` реализует application-порты;
-- `bootstrap` создаёт объекты и передаёт зависимости.
+- `interfaces` переводит wire-контракты во внутренние DTO;
+- `infrastructure` реализует порты из `application`;
+- `config/container.py` создаёт объекты и передаёт зависимости.
+
+`core` здесь означает всё независимое ядро сервиса, а `domain` является его
+частью. Поэтому путь `src/core/domain/models.py` соответствует архитектурному
+языку `test_psek`.
 
 ### 3.2. Где находятся модели
 
@@ -239,13 +256,18 @@ bootstrap связывает внешние слои между собой
 |---|---|---|
 | `NotificationRequestedV1` | `interfaces/contracts` | Внешний Kafka-контракт |
 | `SendEmailTaskV1` | `interfaces/contracts` | Контракт сообщения RabbitMQ |
-| `ProcessNotificationCommand` | `application` | Вход use case |
-| `SendEmailCommand` | `application` | Внутренняя команда отправки |
-| `EmailRecipient` | `domain` | Независимое понятие предметной области |
-| `RenderedEmail` | `domain` | Независимый результат рендеринга |
+| `ProcessNotificationDTO` | `application/dto` | Вход use case обработки event |
+| `SendEmailDTO` | `application/dto` | Вход use case отправки |
+| `EmailRecipient` | `core/domain` | Независимое понятие предметной области |
+| `RenderedEmail` | `core/domain` | Независимый результат рендеринга |
 
-Pydantic используется на внешних границах. Внутри application/domain
-используются обычные dataclass-модели.
+DTO — это объекты передачи данных между adapter и use case. Как и в
+`test_psek`, application DTO реализованы Pydantic-моделями.
+
+Pydantic-модели в `interfaces/contracts` тоже переносят данные, но мы явно
+называем их **wire-контрактами**, потому что они описывают JSON конкретной
+версии Kafka/Celery-сообщения. Контракт и application DTO нельзя объединять:
+они меняются по разным причинам.
 
 ### 3.3. Почему один use case async, а второй sync
 
@@ -261,6 +283,38 @@ Console sender также синхронные, поэтому этот use case
 
 Не нужно превращать всё приложение в async только ради единообразия. Async
 нужен там, где он действительно помогает ожидать сетевой I/O.
+
+### 3.4. Что взято из `test_psek`, а что добавлено
+
+Сохраняем знакомую тебе основу:
+
+```text
+core/domain       — внутренние модели
+application/dto   — Pydantic DTO
+application/use_case
+infrastructure
+interfaces
+config
+run
+```
+
+Для notification-service добавляются три явных элемента:
+
+- `application/ports` — потому что use cases зависят от нескольких внешних
+  действий, а не только repository;
+- `interfaces/contracts/v1` — потому что Kafka и RabbitMQ сообщения являются
+  версионируемыми wire-контрактами;
+- `config/container.py` — потому что нужно собирать зависимости для двух
+  отдельных процессов: Kafka consumer и Celery worker.
+
+Mapper внешнего wire-контракта расположен в `interfaces/mappers.py`, а не в
+`application/mappers`: иначе application пришлось бы импортировать
+`interfaces/contracts`. В будущем внутренние мапперы, которые не знают о
+Kafka/Celery-контрактах, можно размещать в `application/mappers`, как в
+`test_psek`.
+
+Это развитие структуры `test_psek` под новый тип сервиса, а не её замена другой
+архитектурой.
 
 ---
 
@@ -288,7 +342,8 @@ transactional-notification-service/
 │           └── body.txt
 ├── run/
 │   ├── __init__.py
-│   └── consumer.py
+│   ├── consumer.py
+│   └── worker.py
 ├── scripts/
 │   ├── __init__.py
 │   └── publish_test_event.py
@@ -296,29 +351,35 @@ transactional-notification-service/
 │   ├── __init__.py
 │   ├── application/
 │   │   ├── __init__.py
-│   │   ├── commands.py
+│   │   ├── dto/
+│   │   │   ├── __init__.py
+│   │   │   └── notification.py
 │   │   ├── exceptions.py
 │   │   ├── ports/
 │   │   │   ├── __init__.py
 │   │   │   ├── email_sender.py
 │   │   │   ├── task_publisher.py
 │   │   │   └── template_renderer.py
-│   │   └── use_cases/
+│   │   └── use_case/
 │   │       ├── __init__.py
 │   │       ├── process_notification_event.py
 │   │       └── send_notification.py
-│   ├── bootstrap/
+│   ├── config/
 │   │   ├── __init__.py
-│   │   ├── consumer.py
-│   │   └── worker.py
-│   ├── domain/
+│   │   ├── container.py
+│   │   ├── logging.py
+│   │   └── settings.py
+│   ├── core/
 │   │   ├── __init__.py
-│   │   └── models.py
+│   │   ├── domain/
+│   │   │   ├── __init__.py
+│   │   │   └── models.py
 │   ├── infrastructure/
 │   │   ├── __init__.py
 │   │   ├── celery/
 │   │   │   ├── __init__.py
 │   │   │   ├── app.py
+│   │   │   ├── mappers.py
 │   │   │   └── publisher.py
 │   │   ├── email/
 │   │   │   ├── __init__.py
@@ -329,8 +390,6 @@ transactional-notification-service/
 │   │   ├── templates/
 │   │   │   ├── __init__.py
 │   │   │   └── jinja_renderer.py
-│   │   ├── config.py
-│   │   └── logging.py
 │   └── interfaces/
 │       ├── __init__.py
 │       ├── celery/
@@ -364,6 +423,11 @@ transactional-notification-service/
 `src/interfaces/contracts/events.py` и `src/interfaces/contracts/tasks.py` для
 этого MVP не нужны. Не удаляй их автоматически: сначала сравни старую задумку
 с целевой структурой, затем удали осознанно.
+
+`src/core/repositories.py` из `test_psek` описывает repository для domain-модели
+`User`. В notification-service БД пока нет, поэтому repository ещё не нужен.
+Публикация задачи, рендеринг и отправка email являются зависимостями конкретных
+use cases, поэтому их порты находятся в `application/ports`.
 
 ---
 
@@ -464,7 +528,7 @@ uv run ruff format .
 Создать небольшие внутренние модели, которые не зависят от библиотек и
 транспортов.
 
-### Файл `src/domain/models.py`
+### Файл `src/core/domain/models.py`
 
 ```python
 from dataclasses import dataclass
@@ -496,7 +560,7 @@ class RenderedEmail:
 Убедись, что этот файл можно импортировать без установленных Kafka/Celery:
 
 ```bash
-uv run python -c "from src.domain.models import EmailRecipient; print(EmailRecipient('user@example.com'))"
+uv run python -c "from src.core.domain.models import EmailRecipient; print(EmailRecipient('user@example.com'))"
 ```
 
 ### Самостоятельное упражнение
@@ -505,42 +569,49 @@ uv run python -c "from src.domain.models import EmailRecipient; print(EmailRecip
 
 ---
 
-## 7. Этап 3: application-команды и исключения
+## 7. Этап 3: application DTO и исключения
 
 ### Цель
 
 Описать входные данные use cases независимо от внешних контрактов.
 
-### Файл `src/application/commands.py`
+### Файл `src/application/dto/notification.py`
 
 ```python
-from collections.abc import Mapping
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from src.domain.models import EmailRecipient
+from pydantic import BaseModel, ConfigDict, Field
 
 
-@dataclass(frozen=True, slots=True)
-class ProcessNotificationCommand:
-    event_id: str
-    notification_type: str
+class EmailRecipientDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    email: str
+    name: str | None = None
+
+
+class ProcessNotificationDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    event_id: str = Field(min_length=1, max_length=128)
+    notification_type: str = Field(min_length=3, max_length=200)
     channel: str
     user_id: str | None
-    recipient: EmailRecipient
-    context: Mapping[str, Any]
+    recipient: EmailRecipientDTO
+    context: dict[str, Any]
     created_at: datetime
 
 
-@dataclass(frozen=True, slots=True)
-class SendEmailCommand:
+class SendEmailDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     task_id: UUID
     event_id: str
     notification_type: str
-    recipient: EmailRecipient
-    context: Mapping[str, Any]
+    recipient: EmailRecipientDTO
+    context: dict[str, Any]
     created_at: datetime
 ```
 
@@ -563,10 +634,16 @@ class UnsupportedChannelError(ApplicationError):
 внутреннем Python-коде более явное имя `notification_type` читается лучше и не
 перекрывает встроенную функцию `type`.
 
-### Почему `Mapping`, а не `dict`
+### Почему DTO и wire-контракты не объединены
 
-Use case должен только читать `context`. Тип `Mapping` явно сообщает это
-ограничение вызывающему коду.
+Оба вида моделей используют Pydantic, но выполняют разные роли:
+
+- `interfaces/contracts/v1` фиксирует внешний JSON и его версию;
+- `application/dto` фиксирует удобный вход конкретного use case;
+- mapper между ними защищает application от изменений транспорта.
+
+Application DTO не содержит имён Kafka topics, Celery queues или деталей
+сериализации.
 
 ---
 
@@ -581,11 +658,11 @@ Use case должен только читать `context`. Тип `Mapping` яв
 ```python
 from typing import Protocol
 
-from src.application.commands import SendEmailCommand
+from src.application.dto.notification import SendEmailDTO
 
 
 class TaskPublisher(Protocol):
-    async def publish(self, task: SendEmailCommand) -> None: ...
+    async def publish(self, task: SendEmailDTO) -> None: ...
 ```
 
 ### Файл `src/application/ports/template_renderer.py`
@@ -594,7 +671,7 @@ class TaskPublisher(Protocol):
 from collections.abc import Mapping
 from typing import Any, Protocol
 
-from src.domain.models import RenderedEmail
+from src.core.domain.models import RenderedEmail
 
 
 class TemplateRenderer(Protocol):
@@ -610,7 +687,7 @@ class TemplateRenderer(Protocol):
 ```python
 from typing import Protocol
 
-from src.domain.models import EmailRecipient, RenderedEmail
+from src.core.domain.models import EmailRecipient, RenderedEmail
 
 
 class EmailSender(Protocol):
@@ -624,6 +701,16 @@ class EmailSender(Protocol):
 
 Для этого проекта оба варианта допустимы. `Protocol` уменьшает связанность и
 упрощает fake-реализации в тестах.
+
+### Почему эти порты находятся в `application`
+
+Они описывают внешние действия, необходимые конкретным use cases:
+
+- `ProcessNotificationEvent` требует публикацию `SendEmailDTO`;
+- `SendNotification` требует renderer и sender.
+
+В будущем repository для полноценной domain-модели `Notification` можно
+расположить в `core/repositories.py`, аналогично `test_psek`.
 
 ### Архитектурная проверка
 
@@ -645,20 +732,20 @@ sqlalchemy
 
 Создать и протестировать бизнес-сценарий до подключения Kafka и Celery.
 
-### Файл `src/application/use_cases/process_notification_event.py`
+### Файл `src/application/use_case/process_notification_event.py`
 
 ```python
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from src.application.commands import ProcessNotificationCommand, SendEmailCommand
+from src.application.dto.notification import ProcessNotificationDTO, SendEmailDTO
 from src.application.exceptions import UnsupportedChannelError
 from src.application.ports.task_publisher import TaskPublisher
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class ProcessNotificationEvent:
@@ -673,16 +760,16 @@ class ProcessNotificationEvent:
         self._id_factory = id_factory
         self._clock = clock
 
-    async def execute(self, command: ProcessNotificationCommand) -> SendEmailCommand:
-        if command.channel != "email":
-            raise UnsupportedChannelError(command.channel)
+    async def execute(self, dto: ProcessNotificationDTO) -> SendEmailDTO:
+        if dto.channel != "email":
+            raise UnsupportedChannelError(dto.channel)
 
-        task = SendEmailCommand(
+        task = SendEmailDTO(
             task_id=self._id_factory(),
-            event_id=command.event_id,
-            notification_type=command.notification_type,
-            recipient=command.recipient,
-            context=dict(command.context),
+            event_id=dto.event_id,
+            notification_type=dto.notification_type,
+            recipient=dto.recipient,
+            context=dict(dto.context),
             created_at=self._clock(),
         )
 
@@ -711,43 +798,45 @@ await self._publisher.publish(task)
 ### Файл `tests/unit/test_process_notification_event.py`
 
 ```python
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
 
-from src.application.commands import ProcessNotificationCommand, SendEmailCommand
+from src.application.dto.notification import (
+    EmailRecipientDTO,
+    ProcessNotificationDTO,
+    SendEmailDTO,
+)
 from src.application.exceptions import UnsupportedChannelError
-from src.application.use_cases.process_notification_event import ProcessNotificationEvent
-from src.domain.models import EmailRecipient
-
+from src.application.use_case.process_notification_event import ProcessNotificationEvent
 
 TASK_ID = UUID("11111111-1111-1111-1111-111111111111")
-CREATED_AT = datetime(2026, 6, 11, 12, 0, tzinfo=timezone.utc)
+CREATED_AT = datetime(2026, 6, 11, 12, 0, tzinfo=UTC)
 
 
 class FakeTaskPublisher:
     def __init__(self) -> None:
-        self.published: list[SendEmailCommand] = []
+        self.published: list[SendEmailDTO] = []
 
-    async def publish(self, task: SendEmailCommand) -> None:
+    async def publish(self, task: SendEmailDTO) -> None:
         self.published.append(task)
 
 
 class FailingTaskPublisher:
-    async def publish(self, task: SendEmailCommand) -> None:
+    async def publish(self, task: SendEmailDTO) -> None:
         raise ConnectionError("RabbitMQ is unavailable")
 
 
-def make_command(channel: str = "email") -> ProcessNotificationCommand:
-    return ProcessNotificationCommand(
+def make_dto(channel: str = "email") -> ProcessNotificationDTO:
+    return ProcessNotificationDTO(
         event_id="event-1",
         notification_type="auth.email_confirmation",
         channel=channel,
         user_id="user-1",
-        recipient=EmailRecipient(email="user@example.com", name="Ivan"),
+        recipient=EmailRecipientDTO(email="user@example.com", name="Ivan"),
         context={"verification_url": "https://example.com/verify"},
-        created_at=datetime(2026, 6, 11, 11, 59, tzinfo=timezone.utc),
+        created_at=datetime(2026, 6, 11, 11, 59, tzinfo=UTC),
     )
 
 
@@ -759,13 +848,13 @@ async def test_publishes_email_task() -> None:
         clock=lambda: CREATED_AT,
     )
 
-    task = await use_case.execute(make_command())
+    task = await use_case.execute(make_dto())
 
-    assert task == SendEmailCommand(
+    assert task == SendEmailDTO(
         task_id=TASK_ID,
         event_id="event-1",
         notification_type="auth.email_confirmation",
-        recipient=EmailRecipient(email="user@example.com", name="Ivan"),
+        recipient=EmailRecipientDTO(email="user@example.com", name="Ivan"),
         context={"verification_url": "https://example.com/verify"},
         created_at=CREATED_AT,
     )
@@ -777,7 +866,7 @@ async def test_rejects_unsupported_channel() -> None:
     use_case = ProcessNotificationEvent(publisher)
 
     with pytest.raises(UnsupportedChannelError):
-        await use_case.execute(make_command(channel="sms"))
+        await use_case.execute(make_dto(channel="sms"))
 
     assert publisher.published == []
 
@@ -786,7 +875,7 @@ async def test_does_not_hide_publisher_error() -> None:
     use_case = ProcessNotificationEvent(FailingTaskPublisher())
 
     with pytest.raises(ConnectionError, match="RabbitMQ is unavailable"):
-        await use_case.execute(make_command())
+        await use_case.execute(make_dto())
 ```
 
 ### Проверка
@@ -815,12 +904,13 @@ uv run pytest tests/unit/test_process_notification_event.py -vv
 
 Описать отправку независимо от Celery, Jinja и конкретного email-провайдера.
 
-### Файл `src/application/use_cases/send_notification.py`
+### Файл `src/application/use_case/send_notification.py`
 
 ```python
-from src.application.commands import SendEmailCommand
+from src.application.dto.notification import SendEmailDTO
 from src.application.ports.email_sender import EmailSender
 from src.application.ports.template_renderer import TemplateRenderer
+from src.core.domain.models import EmailRecipient
 
 
 class SendNotification:
@@ -832,18 +922,22 @@ class SendNotification:
         self._renderer = renderer
         self._sender = sender
 
-    def execute(self, command: SendEmailCommand) -> None:
-        context = dict(command.context)
+    def execute(self, dto: SendEmailDTO) -> None:
+        recipient = EmailRecipient(
+            email=dto.recipient.email,
+            name=dto.recipient.name,
+        )
+        context = dict(dto.context)
         context["recipient"] = {
-            "email": command.recipient.email,
-            "name": command.recipient.name,
+            "email": recipient.email,
+            "name": recipient.name,
         }
 
         email = self._renderer.render(
-            command.notification_type,
+            dto.notification_type,
             context,
         )
-        self._sender.send(command.recipient, email)
+        self._sender.send(recipient, email)
 ```
 
 ### Почему use case добавляет `recipient` в context
@@ -852,19 +946,19 @@ class SendNotification:
 должен дублировать имя и email в произвольном `context`.
 
 Ключ `recipient` является зарезервированным системным ключом: use case всегда
-перезаписывает его достоверными данными из `command.recipient`.
+перезаписывает его достоверными данными из `dto.recipient`.
 
 ### Файл `tests/unit/test_send_notification.py`
 
 ```python
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from src.application.commands import SendEmailCommand
-from src.application.use_cases.send_notification import SendNotification
-from src.domain.models import EmailRecipient, RenderedEmail
+from src.application.dto.notification import EmailRecipientDTO, SendEmailDTO
+from src.application.use_case.send_notification import SendNotification
+from src.core.domain.models import EmailRecipient, RenderedEmail
 
 
 class FakeTemplateRenderer:
@@ -896,16 +990,16 @@ def test_renders_and_sends_email() -> None:
     renderer = FakeTemplateRenderer()
     sender = FakeEmailSender()
     use_case = SendNotification(renderer, sender)
-    command = SendEmailCommand(
+    dto = SendEmailDTO(
         task_id=UUID("11111111-1111-1111-1111-111111111111"),
         event_id="event-1",
         notification_type="auth.email_confirmation",
-        recipient=EmailRecipient(email="user@example.com", name="Ivan"),
+        recipient=EmailRecipientDTO(email="user@example.com", name="Ivan"),
         context={"verification_url": "https://example.com/verify"},
-        created_at=datetime(2026, 6, 11, 12, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 6, 11, 12, 0, tzinfo=UTC),
     )
 
-    use_case.execute(command)
+    use_case.execute(dto)
 
     assert renderer.calls == [
         (
@@ -1021,6 +1115,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
+SEND_EMAIL_TASK_NAME = "notification.send_email.v1"
+
 
 class EmailTaskRecipientV1(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -1067,29 +1163,29 @@ RabbitMQ является внешним вводом для worker, даже е
 
 ### Цель
 
-Не позволить Pydantic-контрактам проникнуть в application-слой.
+Не позволить внешним wire-контрактам проникнуть в application-слой.
 
 ### Файл `src/interfaces/mappers.py`
 
 ```python
-from src.application.commands import ProcessNotificationCommand, SendEmailCommand
-from src.domain.models import EmailRecipient
-from src.interfaces.contracts.v1.notification_requested import NotificationRequestedV1
-from src.interfaces.contracts.v1.send_email_task import (
-    EmailTaskRecipientV1,
-    SendEmailTaskV1,
+from src.application.dto.notification import (
+    EmailRecipientDTO,
+    ProcessNotificationDTO,
+    SendEmailDTO,
 )
+from src.interfaces.contracts.v1.notification_requested import NotificationRequestedV1
+from src.interfaces.contracts.v1.send_email_task import SendEmailTaskV1
 
 
-def notification_event_to_command(
+def notification_event_to_dto(
     event: NotificationRequestedV1,
-) -> ProcessNotificationCommand:
-    return ProcessNotificationCommand(
+) -> ProcessNotificationDTO:
+    return ProcessNotificationDTO(
         event_id=event.event_id,
         notification_type=event.type,
         channel=event.channel,
         user_id=event.user_id,
-        recipient=EmailRecipient(
+        recipient=EmailRecipientDTO(
             email=str(event.recipient.email),
             name=event.recipient.name,
         ),
@@ -1098,26 +1194,12 @@ def notification_event_to_command(
     )
 
 
-def send_email_command_to_task(command: SendEmailCommand) -> SendEmailTaskV1:
-    return SendEmailTaskV1(
-        task_id=command.task_id,
-        event_id=command.event_id,
-        type=command.notification_type,
-        recipient=EmailTaskRecipientV1(
-            email=command.recipient.email,
-            name=command.recipient.name,
-        ),
-        context=dict(command.context),
-        created_at=command.created_at,
-    )
-
-
-def send_email_task_to_command(task: SendEmailTaskV1) -> SendEmailCommand:
-    return SendEmailCommand(
+def send_email_task_to_dto(task: SendEmailTaskV1) -> SendEmailDTO:
+    return SendEmailDTO(
         task_id=task.task_id,
         event_id=task.event_id,
         notification_type=task.type,
-        recipient=EmailRecipient(
+        recipient=EmailRecipientDTO(
             email=str(task.recipient.email),
             name=task.recipient.name,
         ),
@@ -1129,15 +1211,15 @@ def send_email_task_to_command(task: SendEmailTaskV1) -> SendEmailCommand:
 ### Архитектурная проверка
 
 `application` ничего не знает о `NotificationRequestedV1` и
-`SendEmailTaskV1`. Только внешний слой знает и о контрактах, и о внутренних
-командах.
+`SendEmailTaskV1`. Только внешний слой знает одновременно о wire-контрактах и
+application DTO.
 
 ### Самостоятельное упражнение
 
 Напиши unit-тест, который:
 
 1. Создаёт `NotificationRequestedV1`.
-2. Преобразует его в `ProcessNotificationCommand`.
+2. Преобразует его в `ProcessNotificationDTO`.
 3. Проверяет преобразование `EmailStr` в обычный `str`.
 
 ---
@@ -1234,7 +1316,7 @@ from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
-from src.domain.models import RenderedEmail
+from src.core.domain.models import RenderedEmail
 
 
 class JinjaTemplateRenderer:
@@ -1343,8 +1425,7 @@ uv run pytest tests/integration/test_jinja_renderer.py -vv
 ```python
 import logging
 
-from src.domain.models import EmailRecipient, RenderedEmail
-
+from src.core.domain.models import EmailRecipient, RenderedEmail
 
 logger = logging.getLogger(__name__)
 
@@ -1405,7 +1486,7 @@ cp .env.example .env
 
 Не помещай `.env` с реальными секретами в Git.
 
-### Файл `src/infrastructure/config.py`
+### Файл `src/config/settings.py`
 
 ```python
 from functools import lru_cache
@@ -1442,7 +1523,7 @@ def get_settings() -> Settings:
     return Settings()
 ```
 
-### Файл `src/infrastructure/logging.py`
+### Файл `src/config/logging.py`
 
 ```python
 import logging
@@ -1603,17 +1684,14 @@ docker compose start
 ```python
 from celery import Celery
 
-from src.infrastructure.config import get_settings
-
-
-SEND_EMAIL_TASK_NAME = "notification.send_email.v1"
+from src.config.settings import get_settings
+from src.interfaces.contracts.v1.send_email_task import SEND_EMAIL_TASK_NAME
 
 settings = get_settings()
 
 celery_app = Celery(
     "transactional_notification_service",
     broker=settings.celery_broker_url,
-    include=["src.interfaces.celery.tasks"],
 )
 
 celery_app.conf.update(
@@ -1666,6 +1744,33 @@ Publisher confirm просит RabbitMQ подтвердить приём пуб
 
 ## 20. Этап 16: Celery adapter для TaskPublisher
 
+### Файл `src/infrastructure/celery/mappers.py`
+
+```python
+from src.application.dto.notification import SendEmailDTO
+from src.interfaces.contracts.v1.send_email_task import (
+    EmailTaskRecipientV1,
+    SendEmailTaskV1,
+)
+
+
+def send_email_dto_to_contract(dto: SendEmailDTO) -> SendEmailTaskV1:
+    return SendEmailTaskV1(
+        task_id=dto.task_id,
+        event_id=dto.event_id,
+        type=dto.notification_type,
+        recipient=EmailTaskRecipientV1(
+            email=dto.recipient.email,
+            name=dto.recipient.name,
+        ),
+        context=dict(dto.context),
+        created_at=dto.created_at,
+    )
+```
+
+Этот mapper принадлежит исходящему Celery adapter: он преобразует application
+DTO во внешний RabbitMQ/Celery wire-контракт.
+
 ### Файл `src/infrastructure/celery/publisher.py`
 
 ```python
@@ -1674,9 +1779,9 @@ from typing import Any
 
 from celery import Celery
 
-from src.application.commands import SendEmailCommand
-from src.infrastructure.celery.app import SEND_EMAIL_TASK_NAME
-from src.interfaces.mappers import send_email_command_to_task
+from src.application.dto.notification import SendEmailDTO
+from src.infrastructure.celery.mappers import send_email_dto_to_contract
+from src.interfaces.contracts.v1.send_email_task import SEND_EMAIL_TASK_NAME
 
 
 class CeleryTaskPublisher:
@@ -1684,8 +1789,8 @@ class CeleryTaskPublisher:
         self._app = app
         self._queue = queue
 
-    async def publish(self, task: SendEmailCommand) -> None:
-        contract = send_email_command_to_task(task)
+    async def publish(self, task: SendEmailDTO) -> None:
+        contract = send_email_dto_to_contract(task)
         payload: dict[str, Any] = contract.model_dump(mode="json")
 
         await asyncio.to_thread(
@@ -1721,13 +1826,13 @@ Kafka consumer знает имя команды, но не обязан импо
 
 ## 21. Этап 17: композиция worker
 
-### Файл `src/bootstrap/worker.py`
+### Файл `src/config/container.py`
 
 ```python
 from functools import lru_cache
 
-from src.application.use_cases.send_notification import SendNotification
-from src.infrastructure.config import get_settings
+from src.application.use_case.send_notification import SendNotification
+from src.config.settings import get_settings
 from src.infrastructure.email.console_sender import ConsoleEmailSender
 from src.infrastructure.templates.jinja_renderer import JinjaTemplateRenderer
 
@@ -1761,21 +1866,22 @@ Application-слой не создаёт adapters самостоятельно.
 ```python
 from typing import Any
 
-from src.bootstrap.worker import get_send_notification_use_case
-from src.infrastructure.celery.app import SEND_EMAIL_TASK_NAME, celery_app
-from src.interfaces.contracts.v1.send_email_task import SendEmailTaskV1
-from src.interfaces.mappers import send_email_task_to_command
+from celery import Celery
+
+from src.application.use_case.send_notification import SendNotification
+from src.interfaces.contracts.v1.send_email_task import SEND_EMAIL_TASK_NAME, SendEmailTaskV1
+from src.interfaces.mappers import send_email_task_to_dto
 
 
-@celery_app.task(
-    name=SEND_EMAIL_TASK_NAME,
-    ignore_result=True,
-)
-def send_email_task(payload: dict[str, Any]) -> None:
-    task = SendEmailTaskV1.model_validate(payload)
-    command = send_email_task_to_command(task)
-    use_case = get_send_notification_use_case()
-    use_case.execute(command)
+def register_tasks(app: Celery, use_case: SendNotification) -> None:
+    @app.task(
+        name=SEND_EMAIL_TASK_NAME,
+        ignore_result=True,
+    )
+    def send_email_task(payload: dict[str, Any]) -> None:
+        task = SendEmailTaskV1.model_validate(payload)
+        dto = send_email_task_to_dto(task)
+        use_case.execute(dto)
 ```
 
 ### Ответственность этого файла
@@ -1784,16 +1890,36 @@ Celery task:
 
 1. принимает внешний payload;
 2. валидирует контракт;
-3. преобразует его во внутреннюю команду;
+3. преобразует его во внутренний application DTO;
 4. вызывает use case.
 
 Она не рендерит шаблон и не отправляет email самостоятельно.
+
+`register_tasks()` получает use case явным аргументом. Поэтому Celery adapter
+не импортирует `config/container` и не ищет зависимости самостоятельно.
+
+### Файл `run/worker.py`
+
+```python
+from src.config.container import get_send_notification_use_case
+from src.infrastructure.celery.app import celery_app
+from src.interfaces.celery.tasks import register_tasks
+
+register_tasks(celery_app, get_send_notification_use_case())
+
+__all__ = ["celery_app"]
+```
+
+Как и `run/main.py` в `test_psek`, этот модуль является внешней точкой запуска.
+Он не содержит бизнес-логики: получает готовый use case из container,
+регистрирует входной adapter и предоставляет собранное приложение процессу
+Celery.
 
 ### Первый запуск worker
 
 ```bash
 uv run celery \
-  -A src.infrastructure.celery.app:celery_app \
+  -A run.worker:celery_app \
   worker \
   --loglevel=INFO \
   --queues=notification.email
@@ -1815,7 +1941,8 @@ notification.email
 notification.send_email.v1
 ```
 
-Если её нет, объясни роль параметра `include` в `celery_app`.
+Если её нет, проверь, что `run/worker.py` вызвал `register_tasks()` до запуска
+worker.
 
 ---
 
@@ -1832,9 +1959,9 @@ notification.send_email.v1
 ```python
 import json
 
-from src.application.use_cases.process_notification_event import ProcessNotificationEvent
+from src.application.use_case.process_notification_event import ProcessNotificationEvent
 from src.interfaces.contracts.v1.notification_requested import NotificationRequestedV1
-from src.interfaces.mappers import notification_event_to_command
+from src.interfaces.mappers import notification_event_to_dto
 
 
 class InvalidEventPayloadError(ValueError):
@@ -1851,8 +1978,8 @@ class KafkaNotificationHandler:
 
         payload = json.loads(raw_value)
         event = NotificationRequestedV1.model_validate(payload)
-        command = notification_event_to_command(event)
-        await self._use_case.execute(command)
+        dto = notification_event_to_dto(event)
+        await self._use_case.execute(dto)
 ```
 
 ### Какие ошибки считаются постоянными
@@ -1879,7 +2006,7 @@ class KafkaNotificationHandler:
 ```python
 import base64
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from aiokafka import AIOKafkaProducer
 from aiokafka.structs import ConsumerRecord
@@ -1914,7 +2041,7 @@ class KafkaDeadLetterPublisher:
                 "type": type(error).__name__,
                 "message": str(error),
             },
-            "failed_at": datetime.now(timezone.utc).isoformat(),
+            "failed_at": datetime.now(UTC).isoformat(),
         }
 
         await self._producer.send_and_wait(
@@ -1960,7 +2087,6 @@ from pydantic import ValidationError
 
 from src.application.exceptions import UnsupportedChannelError
 from src.interfaces.kafka.handler import InvalidEventPayloadError, KafkaNotificationHandler
-
 
 logger = logging.getLogger(__name__)
 
@@ -2068,18 +2194,31 @@ Kafka хранит offset **следующего** сообщения, кото�
 
 ## 26. Этап 22: композиция consumer
 
-### Файл `src/bootstrap/consumer.py`
+### Расширь файл `src/config/container.py`
 
 ```python
+from functools import lru_cache
+
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 
-from src.application.use_cases.process_notification_event import ProcessNotificationEvent
+from src.application.use_case.process_notification_event import ProcessNotificationEvent
+from src.application.use_case.send_notification import SendNotification
+from src.config.settings import get_settings
 from src.infrastructure.celery.app import celery_app
 from src.infrastructure.celery.publisher import CeleryTaskPublisher
-from src.infrastructure.config import get_settings
+from src.infrastructure.email.console_sender import ConsoleEmailSender
 from src.infrastructure.kafka.dead_letter import KafkaDeadLetterPublisher
+from src.infrastructure.templates.jinja_renderer import JinjaTemplateRenderer
 from src.interfaces.kafka.consumer import NotificationKafkaConsumer
 from src.interfaces.kafka.handler import KafkaNotificationHandler
+
+
+@lru_cache
+def get_send_notification_use_case() -> SendNotification:
+    settings = get_settings()
+    renderer = JinjaTemplateRenderer(settings.email_templates_dir)
+    sender = ConsoleEmailSender()
+    return SendNotification(renderer, sender)
 
 
 def build_notification_consumer() -> NotificationKafkaConsumer:
@@ -2140,9 +2279,9 @@ CeleryTaskPublisher
 ```python
 import asyncio
 
-from src.bootstrap.consumer import build_notification_consumer
-from src.infrastructure.config import get_settings
-from src.infrastructure.logging import configure_logging
+from src.config.container import build_notification_consumer
+from src.config.logging import configure_logging
+from src.config.settings import get_settings
 
 
 async def main() -> None:
@@ -2183,12 +2322,12 @@ uv run python -m run.consumer
 
 ```python
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from aiokafka import AIOKafkaProducer
 
-from src.infrastructure.config import get_settings
+from src.config.settings import get_settings
 from src.interfaces.contracts.v1.notification_requested import (
     EmailRecipientV1,
     NotificationRequestedV1,
@@ -2218,7 +2357,7 @@ async def main() -> None:
                 "app_name": "Example App",
                 "verification_url": "https://example.com/verify-email?token=abc123",
             },
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
 
         metadata = await producer.send_and_wait(
@@ -2275,7 +2414,7 @@ docker compose ps
 
 ```bash
 uv run celery \
-  -A src.infrastructure.celery.app:celery_app \
+  -A run.worker:celery_app \
   worker \
   --loglevel=INFO \
   --queues=notification.email
@@ -2888,7 +3027,7 @@ docker compose exec kafka \
 
 ```bash
 uv run celery \
-  -A src.infrastructure.celery.app:celery_app \
+  -A run.worker:celery_app \
   worker \
   --loglevel=INFO \
   --queues=notification.email
@@ -2935,7 +3074,7 @@ uv run python -m scripts.publish_test_event
 
 ```text
 1. Domain models
-2. Application commands and ports
+2. Application DTO and application ports
 3. ProcessNotificationEvent + unit tests
 4. SendNotification + unit tests
 5. Versioned external contracts
