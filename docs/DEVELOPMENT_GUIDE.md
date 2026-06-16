@@ -254,7 +254,7 @@ core
 
 | Модель | Слой | Причина |
 |---|---|---|
-| `NotificationRequestedV1` | `interfaces/contracts` | Внешний Kafka-контракт |
+| `EmailRequestedV1` | `interfaces/contracts` | Внешний Kafka-контракт из другого сервиса |
 | `SendEmailTaskV1` | `interfaces/contracts` | Контракт сообщения RabbitMQ |
 | `ProcessNotificationDTO` | `application/dto` | Вход use case обработки event |
 | `SendEmailDTO` | `application/dto` | Вход use case отправки |
@@ -336,10 +336,6 @@ transactional-notification-service/
 │       │   ├── subject.txt
 │       │   ├── body.html
 │       │   └── body.txt
-│       └── password_reset/
-│           ├── subject.txt
-│           ├── body.html
-│           └── body.txt
 ├── run/
 │   ├── __init__.py
 │   ├── consumer.py
@@ -399,7 +395,7 @@ transactional-notification-service/
 │       │   ├── __init__.py
 │       │   └── v1/
 │       │       ├── __init__.py
-│       │       ├── notification_requested.py
+│       │       ├── email_requested.py
 │       │       └── send_email_task.py
 │       ├── kafka/
 │       │   ├── __init__.py
@@ -835,7 +831,10 @@ def make_dto(channel: str = "email") -> ProcessNotificationDTO:
         channel=channel,
         user_id="user-1",
         recipient=EmailRecipientDTO(email="user@example.com", name="Ivan"),
-        context={"verification_url": "https://example.com/verify"},
+        context={
+            "verification_url": "https://example.com/verify",
+            "expires_at": "2026-06-16T12:30:00+00:00",
+        },
         created_at=datetime(2026, 6, 11, 11, 59, tzinfo=UTC),
     )
 
@@ -855,7 +854,10 @@ async def test_publishes_email_task() -> None:
         event_id="event-1",
         notification_type="auth.email_confirmation",
         recipient=EmailRecipientDTO(email="user@example.com", name="Ivan"),
-        context={"verification_url": "https://example.com/verify"},
+        context={
+            "verification_url": "https://example.com/verify",
+            "expires_at": "2026-06-16T12:30:00+00:00",
+        },
         created_at=CREATED_AT,
     )
     assert publisher.published == [task]
@@ -995,7 +997,10 @@ def test_renders_and_sends_email() -> None:
         event_id="event-1",
         notification_type="auth.email_confirmation",
         recipient=EmailRecipientDTO(email="user@example.com", name="Ivan"),
-        context={"verification_url": "https://example.com/verify"},
+        context={
+            "verification_url": "https://example.com/verify",
+            "expires_at": "2026-06-16T12:30:00+00:00",
+        },
         created_at=datetime(2026, 6, 11, 12, 0, tzinfo=UTC),
     )
 
@@ -1006,6 +1011,7 @@ def test_renders_and_sends_email() -> None:
             "auth.email_confirmation",
             {
                 "verification_url": "https://example.com/verify",
+                "expires_at": "2026-06-16T12:30:00+00:00",
                 "recipient": {
                     "email": "user@example.com",
                     "name": "Ivan",
@@ -1046,23 +1052,15 @@ uv run pytest tests/unit -vv
 
 Провалидировать данные на входной границе и явно версионировать контракт.
 
-### Файл `src/interfaces/contracts/v1/notification_requested.py`
+### Файл `src/interfaces/contracts/v1/email_requested.py`
 
 ```python
 from datetime import datetime
-from typing import Any
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
-
-
-class EmailRecipientV1(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    email: EmailStr
-    name: str | None = Field(default=None, max_length=200)
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl, field_validator
 
 
-class NotificationRequestedV1(BaseModel):
+class EmailRequestedV1(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     event_id: str = Field(min_length=1, max_length=128)
@@ -1071,31 +1069,37 @@ class NotificationRequestedV1(BaseModel):
         max_length=200,
         pattern=r"^[a-z0-9_]+(?:\.[a-z0-9_]+)+$",
     )
-    channel: str = Field(min_length=1, max_length=30)
-    user_id: str | None = Field(default=None, max_length=128)
-    recipient: EmailRecipientV1
-    context: dict[str, Any]
+    user_id: str = Field(min_length=1, max_length=128)
+    email: EmailStr
+    verification_url: HttpUrl
+    expires_at: datetime
     created_at: datetime
 
-    @field_validator("created_at")
+    @field_validator("expires_at", "created_at")
     @classmethod
-    def created_at_must_have_timezone(cls, value: datetime) -> datetime:
+    def datetime_must_have_timezone(cls, value: datetime) -> datetime:
         if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("created_at must include timezone")
+            raise ValueError("datetime value must include timezone")
         return value
 ```
 
-### Почему `channel` не `Literal["email"]`
+Этот контракт соответствует данным с изображения:
 
-Внешний контракт допускает строку, а application-use-case принимает решение о
-поддерживаемых каналах.
+```go
+type EmailRequested struct {
+    EventID         string    `json:"event_id"`
+    Type            string    `json:"type"`
+    UserID          string    `json:"user_id"`
+    Email           string    `json:"email"`
+    VerificationURL string    `json:"verification_url"`
+    ExpiresAt       time.Time `json:"expires_at"`
+    CreatedAt       time.Time `json:"created_at"`
+}
+```
 
-Если сделать поле `Literal["email"]`, Pydantic отклонит `sms` ещё до application
-слоя. Это тоже допустимый дизайн, но тогда application-проверка никогда не
-используется.
-
-Мы оставляем проверку поддержки канала в use case, потому что список
-поддерживаемых каналов является возможностью приложения, а не форматом JSON.
+Во входящем JSON нет `channel`, `recipient` и `context`. Это нормально:
+контракт уже email-specific, поэтому mapper ниже сам выставит `channel="email"`,
+создаст recipient из поля `email` и соберёт context для шаблона.
 
 ### Почему `extra="forbid"`
 
@@ -1173,23 +1177,26 @@ from src.application.dto.notification import (
     ProcessNotificationDTO,
     SendEmailDTO,
 )
-from src.interfaces.contracts.v1.notification_requested import NotificationRequestedV1
+from src.interfaces.contracts.v1.email_requested import EmailRequestedV1
 from src.interfaces.contracts.v1.send_email_task import SendEmailTaskV1
 
 
-def notification_event_to_dto(
-    event: NotificationRequestedV1,
+def email_event_to_dto(
+    event: EmailRequestedV1,
 ) -> ProcessNotificationDTO:
     return ProcessNotificationDTO(
         event_id=event.event_id,
         notification_type=event.type,
-        channel=event.channel,
+        channel="email",
         user_id=event.user_id,
         recipient=EmailRecipientDTO(
-            email=str(event.recipient.email),
-            name=event.recipient.name,
+            email=str(event.email),
+            name=None,
         ),
-        context=dict(event.context),
+        context={
+            "verification_url": str(event.verification_url),
+            "expires_at": event.expires_at.isoformat(),
+        },
         created_at=event.created_at,
     )
 
@@ -1210,7 +1217,7 @@ def send_email_task_to_dto(task: SendEmailTaskV1) -> SendEmailDTO:
 
 ### Архитектурная проверка
 
-`application` ничего не знает о `NotificationRequestedV1` и
+`application` ничего не знает о `EmailRequestedV1` и
 `SendEmailTaskV1`. Только внешний слой знает одновременно о wire-контрактах и
 application DTO.
 
@@ -1218,9 +1225,10 @@ application DTO.
 
 Напиши unit-тест, который:
 
-1. Создаёт `NotificationRequestedV1`.
+1. Создаёт `EmailRequestedV1`.
 2. Преобразует его в `ProcessNotificationDTO`.
-3. Проверяет преобразование `EmailStr` в обычный `str`.
+3. Проверяет, что `email` превратился в recipient, а `verification_url` и
+   `expires_at` попали в context.
 
 ---
 
@@ -1235,7 +1243,7 @@ application DTO.
 ### Файл `email_templates/auth/email_confirmation/subject.txt`
 
 ```jinja2
-Подтвердите email в {{ app_name }}
+Подтвердите email
 ```
 
 ### Файл `email_templates/auth/email_confirmation/body.html`
@@ -1244,9 +1252,10 @@ application DTO.
 <!doctype html>
 <html lang="ru">
   <body>
-    <p>Здравствуйте{% if recipient.name %}, {{ recipient.name }}{% endif %}.</p>
-    <p>Подтвердите ваш email в {{ app_name }}:</p>
+    <p>Здравствуйте.</p>
+    <p>Подтвердите ваш email:</p>
     <p><a href="{{ verification_url }}">Подтвердить email</a></p>
+    <p>Ссылка действует до {{ expires_at }}.</p>
   </body>
 </html>
 ```
@@ -1254,41 +1263,18 @@ application DTO.
 ### Файл `email_templates/auth/email_confirmation/body.txt`
 
 ```jinja2
-Здравствуйте{% if recipient.name %}, {{ recipient.name }}{% endif %}.
+Здравствуйте.
 
-Подтвердите ваш email в {{ app_name }}:
+Подтвердите ваш email:
 {{ verification_url }}
+
+Ссылка действует до {{ expires_at }}.
 ```
 
-### Файлы для `auth.password_reset`
-
-`email_templates/auth/password_reset/subject.txt`:
-
-```jinja2
-Восстановление пароля в {{ app_name }}
-```
-
-`email_templates/auth/password_reset/body.html`:
-
-```jinja2
-<!doctype html>
-<html lang="ru">
-  <body>
-    <p>Для восстановления пароля перейдите по ссылке:</p>
-    <p><a href="{{ reset_url }}">Восстановить пароль</a></p>
-    <p>Ссылка действует {{ expires_in_minutes }} минут.</p>
-  </body>
-</html>
-```
-
-`email_templates/auth/password_reset/body.txt`:
-
-```jinja2
-Для восстановления пароля перейдите по ссылке:
-{{ reset_url }}
-
-Ссылка действует {{ expires_in_minutes }} минут.
-```
+Для MVP достаточно шаблона `auth.email_confirmation`, потому что входной
+контракт с изображения содержит именно `verification_url` и `expires_at`.
+Другие типы писем потребуют либо новых полей во входном контракте, либо нового
+contract version.
 
 ### Важное соглашение
 
@@ -1370,16 +1356,16 @@ def test_renders_email_confirmation_template() -> None:
     email = renderer.render(
         "auth.email_confirmation",
         {
-            "app_name": "Example App",
             "recipient": {
                 "email": "user@example.com",
-                "name": "Ivan",
+                "name": None,
             },
             "verification_url": "https://example.com/verify",
+            "expires_at": "2026-06-16T12:30:00+00:00",
         },
     )
 
-    assert email.subject == "Подтвердите email в Example App"
+    assert email.subject == "Подтвердите email"
     assert "https://example.com/verify" in email.html_body
     assert "https://example.com/verify" in email.text_body
 
@@ -1391,11 +1377,11 @@ def test_fails_when_required_context_value_is_missing() -> None:
         renderer.render(
             "auth.email_confirmation",
             {
-                "app_name": "Example App",
                 "recipient": {
                     "email": "user@example.com",
-                    "name": "Ivan",
+                    "name": None,
                 },
+                "expires_at": "2026-06-16T12:30:00+00:00",
             },
         )
 ```
@@ -1960,8 +1946,8 @@ worker.
 import json
 
 from src.application.use_case.process_notification_event import ProcessNotificationEvent
-from src.interfaces.contracts.v1.notification_requested import NotificationRequestedV1
-from src.interfaces.mappers import notification_event_to_dto
+from src.interfaces.contracts.v1.email_requested import EmailRequestedV1
+from src.interfaces.mappers import email_event_to_dto
 
 
 class InvalidEventPayloadError(ValueError):
@@ -1977,8 +1963,8 @@ class KafkaNotificationHandler:
             raise InvalidEventPayloadError("Kafka event value cannot be null")
 
         payload = json.loads(raw_value)
-        event = NotificationRequestedV1.model_validate(payload)
-        dto = notification_event_to_dto(event)
+        event = EmailRequestedV1.model_validate(payload)
+        dto = email_event_to_dto(event)
         await self._use_case.execute(dto)
 ```
 
@@ -2328,10 +2314,7 @@ from uuid import uuid4
 from aiokafka import AIOKafkaProducer
 
 from src.config.settings import get_settings
-from src.interfaces.contracts.v1.notification_requested import (
-    EmailRecipientV1,
-    NotificationRequestedV1,
-)
+from src.interfaces.contracts.v1.email_requested import EmailRequestedV1
 
 
 async def main() -> None:
@@ -2344,19 +2327,13 @@ async def main() -> None:
     await producer.start()
 
     try:
-        event = NotificationRequestedV1(
+        event = EmailRequestedV1(
             event_id=str(uuid4()),
             type="auth.email_confirmation",
-            channel="email",
             user_id=str(uuid4()),
-            recipient=EmailRecipientV1(
-                email="user@example.com",
-                name="Ivan",
-            ),
-            context={
-                "app_name": "Example App",
-                "verification_url": "https://example.com/verify-email?token=abc123",
-            },
+            email="user@example.com",
+            verification_url="https://example.com/verify-email?token=abc123",
+            expires_at=datetime(2026, 6, 16, 12, 30, tzinfo=UTC),
             created_at=datetime.now(UTC),
         )
 
