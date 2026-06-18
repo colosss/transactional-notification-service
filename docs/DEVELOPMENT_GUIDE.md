@@ -530,6 +530,7 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+pythonpath = ["."]
 testpaths = ["tests"]
 
 [tool.ruff]
@@ -542,6 +543,15 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 [tool.mypy]
 python_version = "3.13"
 strict = true
+
+[[tool.mypy.overrides]]
+module = [
+    "aiokafka",
+    "aiokafka.*",
+    "celery",
+    "celery.*",
+]
+ignore_missing_imports = true
 ```
 
 ### Проверка
@@ -561,6 +571,16 @@ uv run ruff check .
 - `uv sync` приводит `.venv` к состоянию lock-файла;
 - `uv run` запускает команду внутри окружения проекта;
 - `uv.lock` нужно хранить в Git для приложения.
+
+Почему в `pytest` добавлен `pythonpath = ["."]`: тесты импортируют модули как
+`src.application...`. Явный pythonpath делает запуск стабильным через
+`uv run pytest`, даже если pytest меняет способ импортирования тестовых
+модулей.
+
+Почему для `mypy` добавлены overrides: `aiokafka` и `celery` на этом этапе
+используются как внешние библиотеки без полноценных type stubs. Мы не отключаем
+`strict` для своего кода, а точечно говорим mypy не анализировать типы этих
+внешних пакетов.
 
 ### Самостоятельное упражнение
 
@@ -2442,7 +2462,7 @@ services:
       retries: 10
 
   rabbitmq:
-    image: rabbitmq:4.3.1-management-alpine
+    image: rabbitmq:3.13-management-alpine
     hostname: notification-rabbitmq
     restart: unless-stopped
     environment:
@@ -2475,6 +2495,13 @@ RabbitMQ открывает два порта:
 
 - `5672` — AMQP, его использует Celery;
 - `15672` — web UI для локальной отладки.
+
+Для MVP используется RabbitMQ `3.13-management-alpine`. При проверке RabbitMQ
+`4.3.x` оказался конфликтным с Celery/Kombu: worker падает на ошибке
+`Feature transient_nonexcl_queues is deprecated`, потому что Celery создаёт
+служебные transient queues для remote control/pidbox. На учебном этапе проще и
+надёжнее зафиксировать совместимую 3.13-ветку RabbitMQ, а миграцию на 4.x
+разбирать отдельно.
 
 Healthcheck-и не делают сервис production-ready, но помогают локально:
 контейнер может быть запущен, а брокер ещё не готов принимать соединения.
@@ -2903,7 +2930,7 @@ from src.interfaces.mappers import send_email_task_to_dto
 
 
 def register_tasks(app: Celery, use_case: SendNotification) -> None:
-    @app.task(
+    @app.task(  # type: ignore[untyped-decorator]
         name=SEND_EMAIL_TASK_NAME,
         ignore_result=True,
     )
@@ -3603,14 +3630,16 @@ async def main() -> None:
     await producer.start()
 
     try:
-        event = EmailRequestedV1(
-            event_id=str(uuid4()),
-            type="auth.email_confirmation",
-            user_id=str(uuid4()),
-            email="user@example.com",
-            verification_url="https://example.com/verify-email?token=abc123",
-            expires_at=datetime(2026, 6, 16, 12, 30, tzinfo=UTC),
-            created_at=datetime.now(UTC),
+        event = EmailRequestedV1.model_validate(
+            {
+                "event_id": str(uuid4()),
+                "type": "auth.email_confirmation",
+                "user_id": str(uuid4()),
+                "email": "user@example.com",
+                "verification_url": "https://example.com/verify-email?token=abc123",
+                "expires_at": datetime(2026, 6, 16, 12, 30, tzinfo=UTC),
+                "created_at": datetime.now(UTC),
+            }
         )
 
         metadata = await producer.send_and_wait(
@@ -3637,6 +3666,11 @@ if __name__ == "__main__":
 
 Этот скрипт намеренно создаёт `EmailRequestedV1`, а не внутренний DTO. Он
 имитирует внешний сервис, который пишет в Kafka именно внешний контракт.
+
+`EmailRequestedV1.model_validate({...})` используется вместо прямого
+конструктора, потому что мы имитируем входящий JSON/dict от другого сервиса.
+Заодно это дружит с `mypy`: поле `verification_url` внутри модели имеет тип
+`HttpUrl`, но на входе из JSON приходит обычная строка.
 
 `event.model_dump_json().encode("utf-8")` превращает Pydantic-модель в bytes,
 потому что Kafka value передаётся как bytes.
