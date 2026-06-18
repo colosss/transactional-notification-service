@@ -71,6 +71,63 @@ PostgreSQL, SMTP, наблюдаемость и продуманную retry-п�
 - **архитектурное решение** — выбранный нами способ организации кода;
 - **временно для MVP** — осознанное ограничение, которое будет устранено позже.
 
+### Учебный формат каждого этапа
+
+Дальше почти каждый этап устроен как маленький урок, а не как инструкция
+«скопируй и забудь». Если в каком-то месте ты чувствуешь, что код появился
+слишком резко, используй этот порядок:
+
+1. Сначала прочитай, какую проблему решает файл.
+2. Закрой полный код глазами и попробуй написать минимальный вариант сам.
+3. Не пытайся угадать всё идеально. Достаточно поймать форму:
+   имена классов, основные методы, входные и выходные данные.
+4. Потом открой полный вариант и сравни:
+   что ты назвал иначе, где забыл async, где смешал слой с инфраструктурой.
+5. После сравнения прочитай разбор: он объясняет, зачем код написан именно так.
+6. Только затем запускай проверку.
+
+Важная мысль: если твой первый вариант отличается от полного кода, это не
+ошибка обучения. Разница между твоим вариантом и эталоном как раз показывает,
+какие архитектурные решения стоит разобрать.
+
+### Как читать каждый фрагмент кода
+
+Когда видишь новый файл, задавай пять вопросов:
+
+```text
+1. Это внешний контракт, application DTO, domain model или adapter?
+2. Кто создаёт этот объект?
+3. Кто вызывает этот метод?
+4. Что случится, если зависимость упадёт с ошибкой?
+5. Можно ли протестировать этот код без Kafka, RabbitMQ, Celery и Docker?
+```
+
+Если ответ на пятый вопрос «нет» для application/core-кода, значит слой
+скорее всего уже загрязнился инфраструктурой.
+
+### Мини-попытка перед полным кодом
+
+В каждом серьёзном этапе ниже будет блок «Сначала попробуй сам». Его цель —
+не заставить тебя страдать без подсказок, а дать мозгу зацепку. Когда ты потом
+увидишь полный код, он будет восприниматься не как чужая магия, а как ответ на
+задачу, которую ты уже успел сформулировать.
+
+Пример мини-попытки:
+
+```text
+Нужно сделать use case, который получает DTO и публикует task.
+
+Попробуй сам:
+- придумай имя класса;
+- придумай метод;
+- реши, что передать в конструктор;
+- реши, где создать task_id;
+- реши, нужно ли ловить ошибку publisher.
+```
+
+После этого полный код будет не просто набором строк. Ты уже будешь понимать,
+какие решения в нём закодированы.
+
 ### Как открыть это руководство в Fedora KDE 44
 
 Для чтения исходного Markdown в редакторе выполни:
@@ -524,6 +581,24 @@ uv run ruff format .
 Создать небольшие внутренние модели, которые не зависят от библиотек и
 транспортов.
 
+#### Сначала попробуй сам
+
+До полного кода попробуй написать две модели:
+
+```text
+EmailRecipient:
+- email;
+- необязательное имя.
+
+RenderedEmail:
+- тема письма;
+- HTML-версия;
+- text-версия.
+```
+
+Не используй Pydantic. Представь, что эти модели должны импортироваться даже в
+проекте, где вообще не установлены Kafka, Celery, FastAPI и Jinja.
+
 ### Файл `src/core/domain/models.py`
 
 ```python
@@ -551,6 +626,32 @@ class RenderedEmail:
 - в domain пока нет `Notification` aggregate, потому что без БД и жизненного
   цикла он не приносит пользы.
 
+#### Подробный разбор кода
+
+`EmailRecipient` — это не Kafka payload и не Celery task. Это внутреннее
+представление получателя письма. Ему не важно, откуда пришёл email: из Kafka,
+из базы, из теста или из ручного скрипта.
+
+`RenderedEmail` — результат работы шаблонизатора. После рендера у нас уже есть
+готовые строки: subject, html body и text body. Email sender не должен знать,
+как устроена Jinja и какие переменные были в шаблоне. Он получает уже готовое
+письмо.
+
+Почему здесь `dataclass`, а не Pydantic:
+
+- domain-модель не должна валидировать внешний JSON;
+- domain-модель не должна знать про сериализацию;
+- domain-модель должна быть максимально дешёвой и независимой;
+- Pydantic полезен на границах и в DTO, но не обязан жить во всём проекте.
+
+Почему `frozen=True` важен практически: если письмо уже отрендерено, мы не
+хотим случайно поменять `subject` перед отправкой. Такие случайные изменения
+тяжело искать, особенно когда код пойдёт через worker.
+
+Почему `slots=True` полезен для обучения: если ты ошибёшься и напишешь
+`recipient.emial = "..."`, Python не создаст новый случайный атрибут, а сразу
+упадёт. Это неприятно на секунду, но экономит часы отладки.
+
 ### Обязательная проверка
 
 Убедись, что этот файл можно импортировать без установленных Kafka/Celery:
@@ -570,6 +671,27 @@ uv run python -c "from src.core.domain.models import EmailRecipient; print(Email
 ### Цель
 
 Описать входные данные use cases независимо от внешних контрактов.
+
+#### Сначала попробуй сам
+
+Не смотри на полный код и попробуй ответить:
+
+```text
+ProcessNotificationDTO:
+- что должен получить use case, который обрабатывает событие из Kafka?
+- нужен ли ему Kafka topic?
+- должен ли он знать, что внешний JSON называл поле `type`?
+- куда положить переменные шаблона, если сервис должен быть универсальным?
+
+SendEmailDTO:
+- что должен получить worker, чтобы отправить письмо?
+- нужен ли ему channel, если это уже email task?
+- нужен ли task_id?
+```
+
+Здесь главная идея: DTO описывает не внешний мир, а удобный вход конкретного
+use case. Поэтому DTO может быть похож на внешний контракт, но не обязан быть
+его копией.
 
 ### Файл `src/application/dto/notification.py`
 
@@ -611,6 +733,44 @@ class SendEmailDTO(BaseModel):
     created_at: datetime
 ```
 
+#### Подробный разбор DTO
+
+`EmailRecipientDTO` похож на domain `EmailRecipient`, но это не одна и та же
+модель. DTO живёт в application-слое и используется как вход use case.
+Domain-модель живёт в core/domain и используется там, где мы уже работаем с
+понятием получателя внутри системы.
+
+`ProcessNotificationDTO` — вход для сценария `ProcessNotificationEvent`.
+Название специально длиннее, чем просто `NotificationDTO`: оно говорит, для
+какого действия предназначены данные.
+
+Поля:
+
+- `event_id` нужен для трассировки и будущей идемпотентности;
+- `notification_type` выбирает шаблон, например `auth.email_confirmation`;
+- `channel` пока проверяется use case-ом, потому что позже могут появиться
+  `sms`, `telegram`, `push`;
+- `user_id` может пригодиться для логов, аудита и будущей БД;
+- `recipient` отделён от `context`, потому что получатель является системным
+  полем, а не произвольной переменной шаблона;
+- `context` остаётся словарём, потому что сервис должен быть универсальным:
+  разные проекты и разные типы писем будут передавать разные переменные;
+- `created_at` берётся из исходного event и показывает, когда событие было
+  создано внешним сервисом.
+
+`SendEmailDTO` — уже команда для отправки email. В ней нет `channel`, потому
+что после обработки Kafka event мы уже приняли решение: это email.
+
+Почему `context` не заменён отдельными полями `verification_url` и
+`expires_at`: текущий контракт действительно содержит эти поля, но сервис
+задуман универсальным. Для другого письма это могут быть `order_id`,
+`receipt_url`, `support_email`, `amount`, `currency` и так далее. Если каждый
+раз менять DTO, сервис быстро станет привязанным к одному проекту.
+
+Почему `extra="forbid"` даже во внутренних DTO: если ты случайно передал
+`verificaton_url` с опечаткой, Pydantic не должен молча принять объект. Лучше
+упасть сразу, чем отправить письмо без важной ссылки.
+
 ### Файл `src/application/exceptions.py`
 
 ```python
@@ -623,6 +783,19 @@ class UnsupportedChannelError(ApplicationError):
         super().__init__(f"Unsupported notification channel: {channel}")
         self.channel = channel
 ```
+
+#### Разбор исключений
+
+`ApplicationError` — общий базовый класс для ожидаемых ошибок application-слоя.
+Это не обязательно на первом MVP, но удобно: adapter-ы могут отличать
+предсказуемые ошибки бизнес-сценариев от неожиданных багов.
+
+`UnsupportedChannelError` означает: событие валидное как JSON, но приложение
+пока не умеет обработать указанный канал. Это отличается от ошибки Kafka,
+ошибки RabbitMQ или ошибки шаблонизатора.
+
+Почему exception находится в `application`, а не в `interfaces`: решение о
+поддерживаемых каналах принимает use case, а не Kafka adapter.
 
 ### Почему `notification_type`, а не `type`
 
@@ -649,6 +822,20 @@ Application DTO не содержит имён Kafka topics, Celery queues ил�
 
 Описать, что требуется use cases от внешнего мира, не выбирая реализацию.
 
+#### Сначала попробуй сам
+
+Представь, что use case хочет:
+
+```text
+1. Опубликовать email task.
+2. Отрендерить шаблон.
+3. Отправить готовое письмо.
+```
+
+Попробуй написать только интерфейсы этих действий без Celery, RabbitMQ, Jinja
+и SMTP. Если в твоём варианте появился импорт `celery` или `jinja2`, значит ты
+уже ушёл из application-слоя во внешний adapter.
+
 ### Файл `src/application/ports/task_publisher.py`
 
 ```python
@@ -660,6 +847,14 @@ from src.application.dto.notification import SendEmailDTO
 class TaskPublisher(Protocol):
     async def publish(self, task: SendEmailDTO) -> None: ...
 ```
+
+`TaskPublisher` отвечает только на вопрос: «как use case попросит внешний мир
+поставить задачу на отправку email?». Он не знает, будет ли это Celery,
+RabbitMQ, Redis Queue, HTTP-запрос или простая fake-реализация в тесте.
+
+Метод `publish` сделан `async`, потому что реальная публикация в брокер — это
+сетевой I/O. Даже если Celery внутри синхронный, adapter сможет обернуть вызов
+так, чтобы внешний контракт use case оставался асинхронным.
 
 ### Файл `src/application/ports/template_renderer.py`
 
@@ -678,6 +873,13 @@ class TemplateRenderer(Protocol):
     ) -> RenderedEmail: ...
 ```
 
+`TemplateRenderer` принимает `template_code` и `context`. Он не принимает путь
+к файлу, потому что путь — деталь Jinja adapter-а. Use case говорит:
+«отрендери шаблон такого типа», а не «открой файл вот тут».
+
+`Mapping[str, Any]` выбран вместо `dict[str, Any]`, потому что renderer только
+читает context. Ему не нужно право изменять словарь.
+
 ### Файл `src/application/ports/email_sender.py`
 
 ```python
@@ -689,6 +891,13 @@ from src.core.domain.models import EmailRecipient, RenderedEmail
 class EmailSender(Protocol):
     def send(self, recipient: EmailRecipient, email: RenderedEmail) -> None: ...
 ```
+
+`EmailSender` получает уже готовый `RenderedEmail`. Это важно: отправитель не
+должен сам выбирать шаблон, лезть в context или знать про Jinja. Его работа —
+доставить готовое письмо конкретному получателю.
+
+В MVP sender будет просто писать письмо в лог. Позже здесь появится SMTP или
+провайдер вроде SendGrid/Mailgun, но use case от этого не изменится.
 
 ### Почему `Protocol`, а не `ABC`
 
@@ -727,6 +936,35 @@ sqlalchemy
 ### Цель
 
 Создать и протестировать бизнес-сценарий до подключения Kafka и Celery.
+
+#### Сначала попробуй сам
+
+До полного кода попробуй написать черновик класса:
+
+```text
+Класс: ProcessNotificationEvent
+
+Он должен:
+- получить ProcessNotificationDTO;
+- проверить, что channel == "email";
+- создать SendEmailDTO;
+- опубликовать SendEmailDTO через publisher;
+- вернуть созданную task.
+
+В конструктор передай:
+- publisher;
+- id_factory для task_id;
+- clock для created_at.
+```
+
+В черновике специально подумай над двумя вопросами:
+
+```text
+1. Где должен создаваться task_id: в mapper, use case или Celery adapter?
+2. Нужно ли ловить ошибку publisher внутри use case?
+```
+
+Ответы будут понятнее после полного кода.
 
 ### Файл `src/application/use_case/process_notification_event.py`
 
@@ -773,6 +1011,91 @@ class ProcessNotificationEvent:
         return task
 ```
 
+#### Что здесь выполнено
+
+Этот use case превращает входное событие уровня приложения в команду отправки
+email. Он ещё не отправляет письмо. Его ответственность уже и точнее:
+
+```text
+ProcessNotificationDTO
+    ↓
+проверка поддерживаемого channel
+    ↓
+SendEmailDTO
+    ↓
+TaskPublisher.publish()
+```
+
+Такой use case является мостом между входным consumer-ом и внутренними
+worker-ами, но не знает ни о Kafka, ни о RabbitMQ.
+
+#### Подробный разбор кода
+
+`publisher: TaskPublisher` передаётся через конструктор. Это dependency
+injection: use case не создаёт Celery-клиент сам. В тесте мы дадим fake
+publisher, а в production — Celery adapter.
+
+`id_factory` по умолчанию равен `uuid4`. Это маленькая, но очень полезная
+деталь. Если внутри теста оставить настоящий `uuid4()`, результат каждый раз
+будет разным и assert станет неудобным. Поэтому в тесте мы передаём
+`lambda: TASK_ID`.
+
+`clock` работает по той же причине. В production нужна текущая дата, а в тесте
+фиксированная. Так мы убираем случайность из unit-теста.
+
+Проверка:
+
+```python
+if dto.channel != "email":
+    raise UnsupportedChannelError(dto.channel)
+```
+
+пока выглядит простой, но она важна архитектурно. Внешний event может однажды
+принести `sms`, `telegram` или `push`. Kafka handler должен только разобрать
+сообщение, а решение «умеет ли приложение такой канал» остаётся внутри
+application-слоя.
+
+Создание task:
+
+```python
+task = SendEmailDTO(...)
+```
+
+является переходом от «мы получили notification event» к «нужно отправить
+email». Поэтому у `SendEmailDTO` уже нет поля `channel`: оно стало лишним,
+потому что тип команды уже email-specific.
+
+Строка:
+
+```python
+context=dict(dto.context)
+```
+
+создаёт копию словаря. Это маленькая защита: если кто-то снаружи держит ссылку
+на исходный `context`, он не должен незаметно менять task после её создания.
+
+Строка:
+
+```python
+await self._publisher.publish(task)
+```
+
+не обёрнута в `try/except`. Это осознанно. Если RabbitMQ недоступен, ошибка
+должна подняться до Kafka adapter-а. Тогда Kafka offset не будет подтверждён,
+и сообщение можно будет обработать позже.
+
+Самая опасная ошибка в этом use case — написать так:
+
+```python
+try:
+    await self._publisher.publish(task)
+except ConnectionError:
+    pass
+```
+
+Так код «не падает», но событие теряется: Kafka consumer может решить, что всё
+успешно, подтвердить offset, а task в RabbitMQ так и не появится.
+
 ### Важное поведение
 
 Use case не перехватывает исключение publisher:
@@ -792,6 +1115,29 @@ await self._publisher.publish(task)
 фиксированные значения и не писать нестабильные проверки.
 
 ### Файл `tests/unit/test_process_notification_event.py`
+
+#### Сначала попробуй сам написать тесты
+
+Перед полным кодом попробуй набросать три проверки:
+
+```text
+1. Для channel=email use case публикует SendEmailDTO.
+2. Для channel=sms use case кидает UnsupportedChannelError.
+3. Если publisher падает, use case не скрывает ошибку.
+```
+
+Тебе понадобятся две fake-реализации:
+
+```text
+FakeTaskPublisher:
+- сохраняет опубликованные task в список.
+
+FailingTaskPublisher:
+- всегда кидает ConnectionError.
+```
+
+Если тяжело написать сразу весь тест, начни с первого: создай DTO, вызови
+`execute`, проверь результат и список `publisher.published`.
 
 ```python
 from datetime import UTC, datetime
@@ -880,6 +1226,57 @@ async def test_does_not_hide_publisher_error() -> None:
         await use_case.execute(make_dto())
 ```
 
+#### Подробный разбор теста
+
+`FakeTaskPublisher` — это не mock ради mock-а. Это маленькая контролируемая
+реализация порта `TaskPublisher`. Она показывает, зачем мы вообще вводили port:
+use case можно проверить без RabbitMQ и Celery.
+
+`published: list[SendEmailDTO]` хранит всё, что use case попытался
+опубликовать. После вызова `execute` мы проверяем:
+
+```python
+assert publisher.published == [task]
+```
+
+Это доказывает две вещи:
+
+- use case вернул созданную task;
+- use case действительно передал ту же task во внешний publisher.
+
+`FailingTaskPublisher` нужен для проверки отрицательного сценария. Он имитирует
+недоступный RabbitMQ. Тест:
+
+```python
+with pytest.raises(ConnectionError):
+    await use_case.execute(make_dto())
+```
+
+закрепляет важное поведение: use case не должен прятать сетевую ошибку.
+
+`make_dto()` — локальная фабрика тестовых данных. Она не часть production-кода.
+Её задача — убрать шум из тестов. Вместо того чтобы в каждом тесте заново
+писать большой `ProcessNotificationDTO`, мы пишем один helper и меняем только
+то, что важно для конкретного сценария:
+
+```python
+make_dto(channel="sms")
+```
+
+Почему тест async: метод `execute` async, потому что публикация в broker в
+реальности является I/O-операцией. Даже fake publisher должен иметь async
+метод, чтобы соответствовать порту.
+
+Частые ошибки при переписывании этого файла:
+
+- случайная запятая после объекта: `publisher = FakeTaskPublisher(),` создаёт
+  tuple, а не publisher;
+- забыть вызвать clock: `self._clock` вместо `self._clock()`;
+- положить `make_dto` внутрь класса из-за лишнего отступа;
+- написать `Unsuported` вместо `Unsupported`;
+- перехватить `ConnectionError` внутри use case и тем самым сломать гарантию
+  доставки.
+
 ### Проверка
 
 ```bash
@@ -905,6 +1302,32 @@ uv run pytest tests/unit/test_process_notification_event.py -vv
 ### Цель
 
 Описать отправку независимо от Celery, Jinja и конкретного email-провайдера.
+
+#### Сначала попробуй сам
+
+Напиши черновик use case:
+
+```text
+Класс: SendNotification
+
+Он должен:
+- получить SendEmailDTO;
+- создать domain EmailRecipient;
+- подготовить context для renderer;
+- отрендерить письмо;
+- передать готовое письмо sender-у.
+```
+
+Подумай, кто должен добавить `recipient` в context:
+
+```text
+1. внешний сервис в Kafka event;
+2. mapper;
+3. SendNotification use case.
+```
+
+В этом плане выбираем третий вариант: use case доверяет собственному DTO, а не
+произвольному словарю из внешнего мира.
 
 ### Файл `src/application/use_case/send_notification.py`
 
@@ -942,6 +1365,68 @@ class SendNotification:
         self._sender.send(recipient, email)
 ```
 
+#### Что здесь выполнено
+
+Этот use case делает вторую половину работы:
+
+```text
+SendEmailDTO
+    ↓
+подготовка recipient и context
+    ↓
+TemplateRenderer.render()
+    ↓
+EmailSender.send()
+```
+
+Он не знает, что task пришла из Celery. Для него это просто команда отправки
+email.
+
+#### Подробный разбор кода
+
+Сначала use case создаёт domain-модель:
+
+```python
+recipient = EmailRecipient(...)
+```
+
+Зачем не передать `EmailRecipientDTO` сразу в sender? Потому что sender
+работает с доменным понятием получателя, а не с application DTO. Это тонкая,
+но полезная граница: DTO — форма входа use case, domain model — внутренний
+язык системы.
+
+Дальше создаётся:
+
+```python
+context = dict(dto.context)
+```
+
+Мы не изменяем `dto.context` напрямую. DTO объявлен frozen, но вложенный dict
+всё равно остаётся изменяемым объектом. Копия защищает исходные данные.
+
+Потом use case добавляет системное поле:
+
+```python
+context["recipient"] = {
+    "email": recipient.email,
+    "name": recipient.name,
+}
+```
+
+Это значит: внешний producer может передать `verification_url`, `expires_at`,
+`order_id` и любые другие переменные шаблона, но `recipient` контролирует сам
+notification-service. Так шаблон может обращаться к `recipient.email`, а мы
+уверены, что эти данные взяты из DTO, а не из произвольного `context`.
+
+Рендер:
+
+```python
+email = self._renderer.render(dto.notification_type, context)
+```
+
+отделён от отправки. Renderer отвечает за текст письма, sender — за доставку.
+Именно поэтому тест может проверить их отдельно.
+
 ### Почему use case добавляет `recipient` в context
 
 Данные получателя уже являются частью внутренней команды. Внешний producer не
@@ -951,6 +1436,28 @@ class SendNotification:
 перезаписывает его достоверными данными из `dto.recipient`.
 
 ### Файл `tests/unit/test_send_notification.py`
+
+#### Сначала попробуй сам написать тест
+
+Перед полным кодом попробуй сделать fake renderer и fake sender:
+
+```text
+FakeTemplateRenderer:
+- запоминает template_code и context;
+- возвращает готовый RenderedEmail.
+
+FakeEmailSender:
+- запоминает recipient и email.
+```
+
+Тест должен доказать:
+
+```text
+1. use case передал renderer-у правильный notification_type;
+2. context содержит verification_url, expires_at и recipient;
+3. sender получил domain EmailRecipient;
+4. sender получил RenderedEmail, который вернул renderer.
+```
 
 ```python
 from collections.abc import Mapping
@@ -1031,6 +1538,26 @@ def test_renders_and_sends_email() -> None:
     ]
 ```
 
+#### Подробный разбор теста
+
+Этот тест не проверяет Jinja и не проверяет SMTP. Он проверяет только
+координацию внутри use case:
+
+```text
+DTO → renderer → sender
+```
+
+`FakeTemplateRenderer.calls` хранит историю вызовов renderer-а. Это позволяет
+проверить, какой именно context собрал use case. Здесь важно убедиться, что
+`recipient` добавлен самим приложением.
+
+`FakeEmailSender.sent` хранит отправленные письма. Мы проверяем, что sender
+получил domain `EmailRecipient`, а не DTO. Это маленькая проверка чистоты
+границы между application и domain.
+
+Тест не обязан знать, как Jinja ищет файлы. Это будет отдельный integration
+test для Jinja adapter-а.
+
 ### Проверка
 
 ```bash
@@ -1051,6 +1578,35 @@ uv run pytest tests/unit -vv
 ### Цель
 
 Провалидировать данные на входной границе и явно версионировать контракт.
+
+#### Сначала попробуй сам
+
+Посмотри на контракт другого сервиса:
+
+```go
+type EmailRequested struct {
+    EventID         string    `json:"event_id"`
+    Type            string    `json:"type"`
+    UserID          string    `json:"user_id"`
+    Email           string    `json:"email"`
+    VerificationURL string    `json:"verification_url"`
+    ExpiresAt       time.Time `json:"expires_at"`
+    CreatedAt       time.Time `json:"created_at"`
+}
+```
+
+Попробуй сам описать Pydantic-модель:
+
+```text
+- запрети лишние поля;
+- проверь email как email;
+- проверь verification_url как URL;
+- потребуй timezone у expires_at и created_at;
+- не добавляй channel, recipient или context: их нет во внешнем JSON.
+```
+
+Здесь важно не «улучшить» чужой контракт, а точно принять то, что реально
+приходит из Kafka.
 
 ### Файл `src/interfaces/contracts/v1/email_requested.py`
 
@@ -1101,6 +1657,35 @@ type EmailRequested struct {
 контракт уже email-specific, поэтому mapper ниже сам выставит `channel="email"`,
 создаст recipient из поля `email` и соберёт context для шаблона.
 
+#### Подробный разбор контракта
+
+`EmailRequestedV1` живёт в `interfaces/contracts/v1`, потому что это внешний
+wire-контракт. Он описывает не удобную модель приложения, а конкретный JSON,
+который прилетает из Kafka.
+
+Почему имя не `ProcessNotificationDTO`: потому что этот класс не является
+входом use case. Его задача — проверить внешний payload и не пустить мусор
+глубже в систему.
+
+`EmailStr` и `HttpUrl` используются именно здесь, на границе. Если внешний
+сервис отправил не email или не URL, сообщение считается невалидным ещё до
+application-слоя.
+
+Validator для дат проверяет timezone. Без timezone строка вроде
+`2026-06-16T12:30:00` неоднозначна: это UTC, Москва или локальное время
+контейнера? Для сообщений между сервисами такая неопределённость опасна.
+
+Regex у `type` допускает значения вида:
+
+```text
+auth.email_confirmation
+order.receipt_created
+billing.payment_failed
+```
+
+и не допускает `/` или `..`. Это важно, потому что позже `type` будет
+превращаться в путь к шаблону.
+
 ### Почему `extra="forbid"`
 
 Неизвестное поле часто означает опечатку или несовпадение версий контракта.
@@ -1109,6 +1694,24 @@ type EmailRequested struct {
 ---
 
 ## 12. Этап 8: контракт Celery task v1
+
+#### Сначала попробуй сам
+
+Теперь представь сообщение, которое notification-service сам кладёт в
+RabbitMQ/Celery:
+
+```text
+Нужно передать worker-у:
+- task_id;
+- event_id;
+- type шаблона;
+- email recipient;
+- context для шаблона;
+- created_at.
+```
+
+Попробуй написать модель так, чтобы worker снова валидировал вход. Не
+рассчитывай на то, что «это же наше сообщение, значит оно точно правильное».
 
 ### Файл `src/interfaces/contracts/v1/send_email_task.py`
 
@@ -1161,6 +1764,28 @@ RabbitMQ является внешним вводом для worker, даже е
 Нельзя считать входные данные доверенными только потому, что они пришли из
 внутренней очереди.
 
+#### Подробный разбор task-контракта
+
+`SendEmailTaskV1` — это не application DTO, хотя он очень похож на
+`SendEmailDTO`. Разница в роли:
+
+```text
+SendEmailDTO      — объект внутри application-слоя.
+SendEmailTaskV1   — JSON-контракт сообщения в RabbitMQ/Celery.
+```
+
+Почему task снова содержит `context`: RabbitMQ является границей процесса. Даже
+если consumer и worker лежат в одном репозитории, они могут запускаться разными
+версиями кода. Поэтому worker обязан заново проверить сообщение.
+
+Почему здесь `channel: Literal["email"]`: эта task уже предназначена только
+для email worker-а. В отличие от Kafka event, где могут появиться разные
+каналы, внутренняя Celery task в этом этапе конкретная.
+
+`SEND_EMAIL_TASK_NAME` вынесен в константу, чтобы producer и worker не
+расходились в строке имени task. Ошибка в одной букве приведёт к тому, что
+Celery не найдёт зарегистрированную задачу.
+
 ---
 
 ## 13. Этап 9: мапперы между границами
@@ -1168,6 +1793,27 @@ RabbitMQ является внешним вводом для worker, даже е
 ### Цель
 
 Не позволить внешним wire-контрактам проникнуть в application-слой.
+
+#### Сначала попробуй сам
+
+Напиши две функции на черновике:
+
+```text
+email_event_to_dto:
+- принимает EmailRequestedV1;
+- возвращает ProcessNotificationDTO;
+- channel ставит равным "email";
+- email превращает в EmailRecipientDTO;
+- verification_url и expires_at кладёт в context.
+
+send_email_task_to_dto:
+- принимает SendEmailTaskV1;
+- возвращает SendEmailDTO;
+- копирует context.
+```
+
+Главное правило: mapper может знать сразу о двух слоях. Это его работа. Но
+use case не должен знать о `EmailRequestedV1` или `SendEmailTaskV1`.
 
 ### Файл `src/interfaces/mappers.py`
 
@@ -1221,6 +1867,40 @@ def send_email_task_to_dto(task: SendEmailTaskV1) -> SendEmailDTO:
 `SendEmailTaskV1`. Только внешний слой знает одновременно о wire-контрактах и
 application DTO.
 
+#### Подробный разбор mapper-а
+
+`email_event_to_dto` выполняет адаптацию конкретного входного события к
+универсальной модели приложения:
+
+```text
+EmailRequestedV1.email
+    ↓
+EmailRecipientDTO.email
+
+EmailRequestedV1.verification_url
+EmailRequestedV1.expires_at
+    ↓
+ProcessNotificationDTO.context
+```
+
+Почему `verification_url` и `expires_at` уходят в `context`, а не становятся
+полями DTO: текущий event относится к подтверждению email, но сервис должен
+уметь обслуживать разные проекты и разные шаблоны. Для одного шаблона нужен
+`verification_url`, для другого `receipt_url`, для третьего `reset_url`.
+Универсальная часть сервиса не должна меняться при каждом новом шаблоне.
+
+Почему `channel="email"` выставляется здесь: внешний контракт уже называется
+`EmailRequested`, значит он email-specific. Во внешнем JSON нет поля channel,
+но application use case ожидает channel, потому что позже может принимать
+другие типы уведомлений из других mapper-ов.
+
+`send_email_task_to_dto` делает обратную адаптацию на стороне worker-а:
+RabbitMQ payload снова превращается в application DTO. Worker после этого
+работает так, будто данные пришли из обычного вызова Python, а не из брокера.
+
+Mapper — нормальное место для «склейки» слоёв. Плохо, если такая склейка
+размазывается по use case, consumer и worker одновременно.
+
 ### Самостоятельное упражнение
 
 Напиши unit-тест, который:
@@ -1239,6 +1919,28 @@ application DTO.
 ### Цель
 
 Хранить шаблоны отдельно от Python-кода и выбирать их по notification type.
+
+#### Сначала попробуй сам
+
+Создай мысленно директорию для типа:
+
+```text
+auth.email_confirmation
+        ↓
+email_templates/auth/email_confirmation/
+```
+
+Попробуй решить, какие три файла нужны письму:
+
+```text
+subject.txt  — тема письма;
+body.html    — HTML-версия;
+body.txt     — текстовая версия.
+```
+
+В шаблоне используй только значения из `context`, который mapper положил в
+DTO: `verification_url` и `expires_at`. Не добавляй `app_name`, если его нет во
+входном event.
 
 ### Файл `email_templates/auth/email_confirmation/subject.txt`
 
@@ -1276,6 +1978,25 @@ application DTO.
 Другие типы писем потребуют либо новых полей во входном контракте, либо нового
 contract version.
 
+#### Подробный разбор шаблонов
+
+Шаблон — это не Python-код, но он тоже часть контракта. Если `body.html`
+использует `{{ verification_url }}`, значит renderer должен получить
+`verification_url` в context. Поэтому mapper и use case обязаны сохранить это
+значение.
+
+Почему есть и HTML, и text:
+
+- HTML нужен для нормального вида письма;
+- text нужен для клиентов, которые не показывают HTML;
+- text полезен для логов, тестов и отладки;
+- некоторые email-провайдеры и антиспам-системы лучше относятся к письмам,
+  где есть обе версии.
+
+Почему шаблон не получает весь DTO: Jinja не должна знать про `event_id`,
+`task_id`, Kafka offset и другие служебные поля. Шаблон получает только то, что
+нужно для текста письма.
+
 ### Важное соглашение
 
 Notification type преобразуется в путь:
@@ -1292,6 +2013,23 @@ Regex в Kafka-контракте не допускает `/` и `..`, поэт�
 ---
 
 ## 15. Этап 11: Jinja adapter
+
+#### Сначала попробуй сам
+
+До полного кода попробуй описать класс:
+
+```text
+JinjaTemplateRenderer:
+- получает templates_dir в конструкторе;
+- по template_code строит путь директории;
+- читает subject.txt, body.html, body.txt;
+- рендерит их с context;
+- возвращает RenderedEmail.
+```
+
+Подумай, что должно произойти, если в шаблоне есть `{{ verification_url }}`, а
+в context его нет. В этом плане ответ: рендер должен упасть, а не тихо
+подставить пустую строку.
 
 ### Файл `src/infrastructure/templates/jinja_renderer.py`
 
@@ -1332,6 +2070,36 @@ class JinjaTemplateRenderer:
         )
 ```
 
+#### Подробный разбор adapter-а
+
+`JinjaTemplateRenderer` находится в `infrastructure`, потому что Jinja — это
+конкретная внешняя библиотека. Application-слой знает только порт
+`TemplateRenderer`, а не `jinja2.Environment`.
+
+`templates_dir` передаётся в конструктор, а не захардкожен внутри класса. Это
+позволяет в тестах использовать временную директорию или локальную папку
+`email_templates`.
+
+Строка:
+
+```python
+directory = template_code.replace(".", "/")
+```
+
+превращает `auth.email_confirmation` в `auth/email_confirmation`. Это простое
+соглашение: notification type одновременно является кодом шаблона.
+
+`StrictUndefined` — один из самых важных параметров. Без него Jinja может
+молча заменить отсутствующую переменную пустой строкой. Для email это опасно:
+можно «успешно» отправить письмо без ссылки подтверждения.
+
+`select_autoescape(enabled_extensions=("html", "xml"))` включает экранирование
+для HTML-шаблонов. Если в context попадёт строка с HTML-тегом, Jinja не должна
+превратить её в исполняемый HTML.
+
+`RenderedEmail` возвращается как domain-модель. После adapter-а остальная
+система больше не зависит от Jinja.
+
 ### Почему `StrictUndefined` обязательно
 
 Без него отсутствующая переменная часто превращается в пустую строку. Worker
@@ -1340,6 +2108,18 @@ class JinjaTemplateRenderer:
 С `StrictUndefined` рендеринг завершится ошибкой, и проблема станет видимой.
 
 ### Файл `tests/integration/test_jinja_renderer.py`
+
+#### Сначала попробуй сам написать integration test
+
+Этот тест уже проверяет реальную Jinja и реальные файлы шаблонов. Попробуй:
+
+```text
+1. Создать JinjaTemplateRenderer(Path("email_templates")).
+2. Вызвать render("auth.email_confirmation", context).
+3. Проверить subject.
+4. Проверить, что ссылка попала в html_body и text_body.
+5. Отдельно проверить, что без verification_url будет UndefinedError.
+```
 
 ```python
 from pathlib import Path
@@ -1386,6 +2166,22 @@ def test_fails_when_required_context_value_is_missing() -> None:
         )
 ```
 
+#### Подробный разбор теста Jinja
+
+Это integration test, потому что он проверяет связку:
+
+```text
+файлы шаблонов + JinjaTemplateRenderer + Jinja2
+```
+
+В отличие от unit-теста `SendNotification`, здесь мы уже хотим убедиться, что
+реальные файлы лежат в правильных директориях и используют правильные имена
+переменных.
+
+Тест с `UndefinedError` защищает от тихой поломки писем. Если кто-то удалит
+`verification_url` из context или переименует переменную в шаблоне, тест должен
+упасть.
+
 ### Проверка
 
 ```bash
@@ -1405,6 +2201,17 @@ uv run pytest tests/integration/test_jinja_renderer.py -vv
 ---
 
 ## 16. Этап 12: ConsoleEmailSender
+
+#### Сначала попробуй сам
+
+Напиши sender, который не отправляет реальный email, а только логирует:
+
+```text
+ConsoleEmailSender.send(recipient, email)
+```
+
+Ему не нужен SMTP, пароль, TLS или внешний провайдер. Для MVP мы хотим
+проверить весь pipeline без риска отправить реальные письма.
 
 ### Файл `src/infrastructure/email/console_sender.py`
 
@@ -1433,6 +2240,25 @@ class ConsoleEmailSender:
         )
 ```
 
+#### Подробный разбор ConsoleEmailSender
+
+Этот adapter реализует порт `EmailSender`, но вместо реальной доставки пишет
+данные в лог. Это не «игрушка», а безопасная ступень разработки.
+
+Почему нельзя сразу подключать реальный SMTP: до идемпотентности Kafka →
+RabbitMQ может породить дубликаты. Если сразу включить SMTP, повторная
+доставка event может отправить пользователю два одинаковых письма.
+
+Console sender позволяет проверить:
+
+- Kafka consumer получил событие;
+- task попала в RabbitMQ;
+- Celery worker взял task;
+- Jinja отрендерила письмо;
+- use case дошёл до sender-а.
+
+И всё это без реальной отправки наружу.
+
 ### Почему это adapter
 
 Application знает только об `EmailSender`. Сегодня реализация пишет письмо в
@@ -1446,6 +2272,22 @@ Application знает только об `EmailSender`. Сегодня реал�
 # Часть IV. Конфигурация и локальная инфраструктура
 
 ## 17. Этап 13: настройки приложения
+
+#### Сначала попробуй сам
+
+Перед полным кодом выпиши, какие значения не должны быть захардкожены:
+
+```text
+- Kafka bootstrap servers;
+- Kafka topic;
+- Kafka group id;
+- RabbitMQ/Celery broker URL;
+- директория шаблонов;
+- уровень логирования.
+```
+
+Настройки должны читаться из окружения, чтобы один и тот же код запускался
+локально, в Docker и позже на сервере.
 
 ### Файл `.env.example`
 
@@ -1509,6 +2351,24 @@ def get_settings() -> Settings:
     return Settings()
 ```
 
+#### Подробный разбор настроек
+
+`Settings` находится в `src/config`, потому что это внешний слой приложения:
+он знает про env-переменные и инфраструктуру. Domain и application не должны
+читать `.env`.
+
+`env_file=".env"` удобен локально: можно положить настройки рядом с проектом.
+В production значения обычно приходят через environment variables, и код от
+этого не меняется.
+
+`extra="ignore"` в settings допустим: в окружении часто есть много переменных,
+которые не относятся к приложению. Это отличается от входных контрактов, где
+`extra="forbid"` полезен для строгой проверки payload.
+
+`get_settings()` обёрнут в `lru_cache`, чтобы настройки создавались один раз.
+Это удобно и для производительности, и для единообразия: разные части
+приложения получают один и тот же объект настроек.
+
 ### Файл `src/config/logging.py`
 
 ```python
@@ -1522,6 +2382,15 @@ def configure_logging(level: str) -> None:
     )
 ```
 
+#### Подробный разбор logging
+
+Логи настраиваются в entrypoint-ах, а не внутри каждого класса. Adapter-ы и use
+case могут получать logger через `logging.getLogger(__name__)`, но не должны
+каждый раз решать формат логов.
+
+Для MVP достаточно `basicConfig`. Позже можно заменить формат на JSON, добавить
+request/event id и отправку логов в observability stack.
+
 ### Почему настройки находятся во внешнем слое
 
 Use cases не должны читать environment variables. Настройки нужны композиции и
@@ -1530,6 +2399,26 @@ Use cases не должны читать environment variables. Настройк
 ---
 
 ## 18. Этап 14: Kafka и RabbitMQ в Docker Compose
+
+#### Сначала попробуй сам
+
+До полного compose-файла попробуй нарисовать сервисы:
+
+```text
+kafka      — принимает внешние events;
+rabbitmq   — брокер Celery task;
+```
+
+Подумай, какие порты нужно открыть наружу для локальной разработки:
+
+```text
+Kafka: 9092
+RabbitMQ: 5672
+RabbitMQ Management UI: 15672
+```
+
+Главная цель compose на этом этапе — дать локальную инфраструктуру, чтобы
+проверять consumer, producer и worker без чужого окружения.
 
 ### Файл `compose.yaml`
 
@@ -1574,6 +2463,24 @@ volumes:
   kafka_data:
   rabbitmq_data:
 ```
+
+#### Подробный разбор compose
+
+Kafka в локальном Docker часто сложнее RabbitMQ из-за advertised listeners.
+Внешний producer на твоей машине должен подключаться к адресу, который Kafka
+сама отдаёт клиентам. Если этот адрес настроен неверно, контейнер будет
+запущен, но Python producer/consumer не сможет нормально подключиться.
+
+RabbitMQ открывает два порта:
+
+- `5672` — AMQP, его использует Celery;
+- `15672` — web UI для локальной отладки.
+
+Healthcheck-и не делают сервис production-ready, но помогают локально:
+контейнер может быть запущен, а брокер ещё не готов принимать соединения.
+
+Compose-файл не должен содержать секреты реального SMTP или production пароли.
+Это локальная инфраструктура для разработки.
 
 ### Запуск
 
@@ -1665,6 +2572,21 @@ docker compose start
 
 Настроить Celery как внешний framework, не допуская его в application-слой.
 
+#### Сначала попробуй сам
+
+Попробуй описать, что должна знать Celery app:
+
+```text
+- broker URL;
+- формат сериализации;
+- timezone;
+- имя очереди;
+- нужно ли хранить result backend.
+```
+
+Не регистрируй task прямо здесь. Сначала создаём приложение Celery, а task
+подключим в отдельном adapter-е.
+
 ### Файл `src/infrastructure/celery/app.py`
 
 ```python
@@ -1703,6 +2625,29 @@ celery_app.conf.update(
 )
 ```
 
+#### Подробный разбор Celery app
+
+Этот файл создаёт объект Celery как инфраструктурную зависимость. Он находится
+в `infrastructure`, потому что Celery — внешний framework, а не бизнес-правило.
+
+`broker=settings.celery_broker_url` говорит Celery использовать RabbitMQ.
+Celery сам не является брокером, он только управляет задачами и worker-ами.
+
+JSON-сериализация выбрана осознанно: сообщение должно быть обычным JSON, а не
+Python pickle. Pickle опаснее и хуже подходит для контрактов между процессами.
+
+`task_default_queue` задаёт очередь по умолчанию, а `task_routes` явно
+направляет `notification.send_email.v1` в email-очередь. Это пригодится, когда
+появятся другие типы worker-ов.
+
+`task_ignore_result=True` отражает смысл email-отправки: нам не нужен result
+backend, где Celery хранит результат функции. Для надёжности доставки позже
+будет отдельная БД/идемпотентность, а не Celery result backend.
+
+`broker_transport_options={"confirm_publish": True}` включает publisher
+confirm для RabbitMQ. Это помогает понять, что RabbitMQ действительно принял
+публикацию перед Kafka commit.
+
 ### Почему нет result backend
 
 Сервису не требуется получать возвращаемое значение task. Хранить результаты
@@ -1730,6 +2675,24 @@ Publisher confirm просит RabbitMQ подтвердить приём пуб
 
 ## 20. Этап 16: Celery adapter для TaskPublisher
 
+#### Сначала попробуй сам
+
+Нужно реализовать application port:
+
+```text
+TaskPublisher.publish(SendEmailDTO)
+```
+
+Но реальная Celery отправка принимает имя task и JSON payload. Попробуй
+разделить задачу на два шага:
+
+```text
+1. SendEmailDTO -> SendEmailTaskV1.
+2. SendEmailTaskV1 -> celery.send_task(...).
+```
+
+Первый шаг — mapper. Второй шаг — adapter.
+
 ### Файл `src/infrastructure/celery/mappers.py`
 
 ```python
@@ -1756,6 +2719,23 @@ def send_email_dto_to_contract(dto: SendEmailDTO) -> SendEmailTaskV1:
 
 Этот mapper принадлежит исходящему Celery adapter: он преобразует application
 DTO во внешний RabbitMQ/Celery wire-контракт.
+
+#### Подробный разбор Celery mapper-а
+
+Этот mapper похож на `interfaces/mappers.py`, но направление другое:
+
+```text
+application DTO
+    ↓
+wire contract для RabbitMQ/Celery
+```
+
+Почему mapper лежит в `infrastructure/celery`, а не рядом с application:
+application не должна знать, что её DTO будет сериализован именно в Celery
+task. Это решение внешнего слоя.
+
+`context=dict(dto.context)` снова делает копию. Это защищает task payload от
+случайного изменения исходного DTO после публикации.
 
 ### Файл `src/infrastructure/celery/publisher.py`
 
@@ -1789,6 +2769,23 @@ class CeleryTaskPublisher:
         )
 ```
 
+#### Подробный разбор CeleryTaskPublisher
+
+`CeleryTaskPublisher` реализует port `TaskPublisher`. Для use case он выглядит
+как объект с методом `publish`, но внутри использует Celery.
+
+Почему `send_task`, а не прямой импорт task-функции: publisher может работать
+в процессе consumer-а, где worker-код не обязан быть импортирован. Ему
+достаточно знать имя task и payload.
+
+Почему `asyncio.to_thread`: Celery API синхронный. Kafka consumer будет async,
+и если вызвать синхронный `send_task` напрямую, можно заблокировать event loop.
+`to_thread` выносит блокирующий вызов в отдельный поток.
+
+`task_id=str(task.task_id)` нужен для трассировки. Но это не дедупликация:
+Celery всё равно может выполнить две задачи с одинаковым id, если они попали в
+очередь дважды.
+
 ### Почему `asyncio.to_thread`
 
 Celery `send_task()` является синхронным вызовом. Kafka consumer работает в
@@ -1811,6 +2808,26 @@ Kafka consumer знает имя команды, но не обязан импо
 ---
 
 ## 21. Этап 17: композиция worker
+
+#### Сначала попробуй сам
+
+Попробуй собрать use case вручную на бумаге:
+
+```text
+SendNotification(
+    renderer=...,
+    sender=...,
+)
+```
+
+Реши, какие конкретные реализации нужны для MVP:
+
+```text
+TemplateRenderer -> JinjaTemplateRenderer
+EmailSender      -> ConsoleEmailSender
+```
+
+Именно этот файл отвечает на вопрос: «какие adapter-ы подключены сейчас?».
 
 ### Файл `src/config/container.py`
 
@@ -1843,9 +2860,35 @@ EmailSender      → ConsoleEmailSender
 
 Application-слой не создаёт adapters самостоятельно.
 
+#### Подробный разбор container
+
+`container.py` — это composition root. Здесь разрешено знать сразу о
+нескольких слоях, потому что задача файла — собрать приложение.
+
+Почему use case не создаёт `JinjaTemplateRenderer` сам: тогда application
+зависел бы от Jinja и пути к шаблонам. Это сломало бы луковую архитектуру.
+
+Почему здесь `lru_cache`: worker может несколько раз запросить use case, но
+создавать новый renderer и sender каждый раз не нужно. Для MVP это простая
+форма singleton-а без глобальных переменных.
+
 ---
 
 ## 22. Этап 18: Celery task как входной adapter
+
+#### Сначала попробуй сам
+
+Представь, что Celery worker получил JSON payload. Что должна сделать task?
+
+```text
+1. Принять payload как dict.
+2. Провалидировать SendEmailTaskV1.
+3. Превратить task contract в SendEmailDTO.
+4. Вызвать SendNotification use case.
+```
+
+Не рендери письмо прямо в Celery task. Task-функция — это adapter, а не место
+для бизнес-сценария.
 
 ### Файл `src/interfaces/celery/tasks.py`
 
@@ -1884,6 +2927,25 @@ Celery task:
 `register_tasks()` получает use case явным аргументом. Поэтому Celery adapter
 не импортирует `config/container` и не ищет зависимости самостоятельно.
 
+#### Подробный разбор Celery task adapter-а
+
+Celery вызывает функцию `send_email_task` сам, когда worker получает сообщение
+из RabbitMQ. Поэтому эта функция является входной границей процесса worker.
+
+`payload: dict[str, Any]` — это ещё не доверенный объект. Его обязательно нужно
+пропустить через:
+
+```python
+SendEmailTaskV1.model_validate(payload)
+```
+
+После validation mapper превращает внешний контракт в `SendEmailDTO`, и только
+после этого вызывается application use case.
+
+Почему `register_tasks(app, use_case)` лучше, чем глобальный use case внутри
+модуля: зависимости становятся явными. В тесте можно передать fake use case,
+а в production — собранный через container.
+
 ### Файл `run/worker.py`
 
 ```python
@@ -1900,6 +2962,20 @@ __all__ = ["celery_app"]
 Он не содержит бизнес-логики: получает готовый use case из container,
 регистрирует входной adapter и предоставляет собранное приложение процессу
 Celery.
+
+#### Подробный разбор entrypoint worker
+
+Команда Celery:
+
+```bash
+celery -A run.worker:celery_app worker
+```
+
+импортирует модуль `run.worker` и ищет в нём объект `celery_app`. Поэтому в
+этом файле мы сначала регистрируем task, а потом экспортируем app.
+
+`run/worker.py` не должен содержать бизнес-правил. Если внутри entrypoint-а
+появляется логика «как отправить письмо», значит она попала не в тот слой.
 
 ### Первый запуск worker
 
@@ -1940,6 +3016,24 @@ worker.
 
 Отделить разбор конкретного Kafka payload от управления соединением и offsets.
 
+#### Сначала попробуй сам
+
+Напиши черновик handler-а:
+
+```text
+KafkaNotificationHandler.handle(raw_value)
+
+Он должен:
+- отклонить None;
+- распарсить JSON;
+- провалидировать EmailRequestedV1;
+- преобразовать event в ProcessNotificationDTO;
+- вызвать ProcessNotificationEvent.
+```
+
+Не добавляй сюда commit offset. Handler отвечает за обработку payload, а
+consumer отвечает за управление Kafka offset.
+
 ### Файл `src/interfaces/kafka/handler.py`
 
 ```python
@@ -1968,6 +3062,25 @@ class KafkaNotificationHandler:
         await self._use_case.execute(dto)
 ```
 
+#### Подробный разбор Kafka handler
+
+`raw_value` приходит из Kafka как bytes. Handler не знает про partition,
+offset, consumer group и commit. Он отвечает только за смысл payload.
+
+`raw_value is None` — это Kafka tombstone-сообщение. Для compacted topics оно
+может быть нормальным явлением, но для нашего notification event value не
+должен быть пустым. Поэтому считаем это невалидным payload.
+
+`json.loads(raw_value)` может упасть с `JSONDecodeError`. Это постоянная
+ошибка сообщения: повторное чтение того же bytes не сделает JSON валидным.
+
+`EmailRequestedV1.model_validate(payload)` отделяет внешний контракт от
+application-слоя. Если payload валиден, mapper создаёт DTO, понятный use case.
+
+Handler не ловит ошибку RabbitMQ. Если `self._use_case.execute(dto)` упадёт
+из-за publisher-а, ошибка должна подняться до Kafka consumer-а, чтобы offset не
+был подтверждён.
+
 ### Какие ошибки считаются постоянными
 
 Следующие ошибки повторное чтение не исправит:
@@ -1986,6 +3099,24 @@ class KafkaNotificationHandler:
 ---
 
 ## 24. Этап 20: Kafka dead-letter publisher
+
+#### Сначала попробуй сам
+
+Представь, что пришло сообщение `not-json`. Его нельзя обработать, но нельзя и
+просто потерять. Что нужно сохранить в DLQ?
+
+```text
+- исходный topic;
+- partition;
+- offset;
+- key;
+- value;
+- тип ошибки;
+- текст ошибки;
+- время попадания в DLQ.
+```
+
+Подумай, почему key/value лучше хранить как base64, а не как обычную строку.
 
 ### Файл `src/infrastructure/kafka/dead_letter.py`
 
@@ -2043,6 +3174,28 @@ class KafkaDeadLetterPublisher:
         return base64.b64encode(value).decode("ascii")
 ```
 
+#### Подробный разбор DLQ publisher
+
+DLQ publisher — это отдельный adapter для записи плохих сообщений в отдельный
+Kafka topic. Он не решает бизнес-задачу отправки email, но помогает системе не
+застрять на poison message.
+
+`envelope` — это обёртка вокруг исходного сообщения. Мы сохраняем не только
+ошибку, но и координаты исходного record:
+
+```text
+topic + partition + offset
+```
+
+Эти три значения позволяют позже найти, откуда пришла проблема.
+
+`key_base64` и `value_base64` нужны, потому что невалидное сообщение может быть
+любыми bytes. Если попытаться всегда декодировать его как UTF-8, можно потерять
+исходные данные или получить новую ошибку уже внутри DLQ-логики.
+
+`send_and_wait` важен: мы хотим дождаться подтверждения записи в DLQ. Только
+после этого consumer имеет право подтвердить исходный Kafka offset.
+
 ### Почему payload хранится в base64
 
 Невалидное Kafka-сообщение может быть не UTF-8 и вообще не JSON. Base64
@@ -2059,6 +3212,29 @@ class KafkaDeadLetterPublisher:
 ---
 
 ## 25. Этап 21: Kafka consumer и ручной commit
+
+#### Сначала попробуй сам
+
+Нарисуй алгоритм обработки одного record:
+
+```text
+try:
+    handler.handle(record.value)
+except permanent_error:
+    dead_letter.publish(record, error)
+
+commit offset
+```
+
+Теперь подумай, чего здесь нет:
+
+```text
+except ConnectionError:
+    ...
+```
+
+Этой ветки специально нет. Временная ошибка RabbitMQ должна остановить
+обработку до commit.
 
 ### Файл `src/interfaces/kafka/consumer.py`
 
@@ -2149,6 +3325,30 @@ class NotificationKafkaConsumer:
 protocol, а не от конкретного `KafkaDeadLetterPublisher`. Конкретную
 реализацию передаёт composition root.
 
+#### Подробный разбор consumer
+
+`enable_auto_commit=False` будет задан при создании `AIOKafkaConsumer` в
+container-е. Поэтому этот класс сам решает, когда offset можно подтвердить.
+
+`PERMANENT_ERRORS` — список ошибок, которые повторное чтение не исправит.
+Например, если payload не JSON, он не станет JSON через секунду.
+
+Алгоритм `_process_record` специально короткий:
+
+```text
+1. Попробовать обработать record.
+2. Если ошибка постоянная — записать record в DLQ.
+3. После успешной обработки или успешной DLQ-записи сделать commit.
+```
+
+Если `handler.handle` упадёт из-за RabbitMQ, ошибка не попадёт в
+`PERMANENT_ERRORS`. Значит метод прервётся до строки commit. Это защищает нас
+от потери уведомления.
+
+Почему `DeadLetterPublisher` описан как локальный `Protocol`: consumer не
+обязан знать, что DLQ тоже Kafka. В тесте или будущем варианте можно передать
+другую реализацию с теми же методами.
+
 ### Самая важная строка consumer
 
 ```python
@@ -2179,6 +3379,22 @@ Kafka хранит offset **следующего** сообщения, кото�
 ---
 
 ## 26. Этап 22: композиция consumer
+
+#### Сначала попробуй сам
+
+Попробуй собрать цепочку зависимостей без кода:
+
+```text
+AIOKafkaConsumer
+KafkaNotificationHandler
+ProcessNotificationEvent
+CeleryTaskPublisher
+KafkaDeadLetterPublisher
+NotificationKafkaConsumer
+```
+
+Затем реши, где должны появиться реальные broker clients. Ответ: в composition
+root, а не внутри use case.
 
 ### Расширь файл `src/config/container.py`
 
@@ -2256,9 +3472,42 @@ CeleryTaskPublisher
 
 Это composition root процесса consumer.
 
+#### Подробный разбор композиции consumer
+
+`CeleryTaskPublisher` подключается как реализация application port
+`TaskPublisher`. После этого `ProcessNotificationEvent` по-прежнему ничего не
+знает про Celery.
+
+`KafkaNotificationHandler` получает use case и занимается только payload.
+`NotificationKafkaConsumer` получает handler и занимается offset-ами.
+
+`AIOKafkaConsumer(..., enable_auto_commit=False)` — ключевая настройка. Если
+оставить auto commit, Kafka может подтвердить сообщение до публикации task в
+RabbitMQ.
+
+`AIOKafkaProducer` для DLQ создаётся отдельно от consumer. Это нормальная
+практика: consumer читает один topic, producer пишет в другой.
+
+`acks="all"` и `enable_idempotence=True` усиливают надёжность записи в DLQ, но
+не отменяют общий принцип at-least-once.
+
 ---
 
 ## 27. Этап 23: entrypoint consumer
+
+#### Сначала попробуй сам
+
+Entrypoint должен сделать только четыре вещи:
+
+```text
+1. Прочитать settings.
+2. Настроить logging.
+3. Собрать consumer через container.
+4. Запустить consumer.run().
+```
+
+Если хочется добавить сюда разбор JSON или публикацию task, остановись: это
+уже ответственность других слоёв.
 
 ### Файл `run/consumer.py`
 
@@ -2292,6 +3541,18 @@ uv run python -m run.consumer
 Остановить процесс можно через `Ctrl+C`. Блок `finally` закроет Kafka consumer
 и producer.
 
+#### Подробный разбор entrypoint consumer
+
+`asyncio.run(main())` создаёт event loop и запускает async consumer. Так как
+`aiokafka` работает через asyncio, entrypoint consumer тоже должен быть async.
+
+`configure_logging(settings.log_level)` вызывается здесь, потому что именно
+entrypoint решает, как выглядит процесс при запуске.
+
+`build_notification_consumer()` скрывает сборку зависимостей. Entry point не
+должен вручную создавать каждый adapter, иначе он быстро превратится в
+нечитабельную смесь инфраструктуры.
+
 ---
 
 # Часть VII. Тестовый producer и полный запуск
@@ -2303,6 +3564,21 @@ uv run python -m run.consumer
 Иметь воспроизводимый способ проверить сервис без другого микросервиса.
 
 Это не одноразовый эксперимент, а полезный development-инструмент.
+
+#### Сначала попробуй сам
+
+До полного кода попробуй написать producer, который:
+
+```text
+- создаёт AIOKafkaProducer;
+- собирает EmailRequestedV1;
+- сериализует event в JSON;
+- отправляет его в notification.requested.v1;
+- использует event_id как key;
+- закрывает producer в finally.
+```
+
+Смысл скрипта — заменить внешний auth-service на время разработки.
 
 ### Файл `scripts/publish_test_event.py`
 
@@ -2356,6 +3632,21 @@ async def main() -> None:
 if __name__ == "__main__":
     asyncio.run(main())
 ```
+
+#### Подробный разбор test producer
+
+Этот скрипт намеренно создаёт `EmailRequestedV1`, а не внутренний DTO. Он
+имитирует внешний сервис, который пишет в Kafka именно внешний контракт.
+
+`event.model_dump_json().encode("utf-8")` превращает Pydantic-модель в bytes,
+потому что Kafka value передаётся как bytes.
+
+`key=event.event_id.encode("utf-8")` делает key связанным с event. Это помогает
+трассировать запись и стабилизирует выбор partition для одинакового key.
+
+`finally: await producer.stop()` нужен даже в учебном скрипте. Сетевые клиенты
+нужно закрывать, иначе можно получить зависшие соединения или предупреждения
+event loop.
 
 ### Почему key равен `event_id`
 
@@ -2428,8 +3719,8 @@ Worker:
 ```text
 Email sent to console
 recipient=user@example.com
-name=Ivan
-subject=Подтвердите email в Example App
+name=None
+subject=Подтвердите email
 ...
 ```
 
