@@ -41,5 +41,32 @@ def test_renders_and_sends_email()->None:
         context={
             "verification_url": "https://example.com/verify",
             "expires_at": "2026-06-16T12:30:00+00:00",
-        }
+        },
+        created_at=datetime(2026, 6, 11, 12, 0, tzinfo=UTC)
     )
+    use_case.execute(dto)
+
+    assert renderer.calls==[
+        (
+            "auth.email_confirmation",
+            {
+                "verification_url": "https://example.com/verify",
+                "expires_at": "2026-06-16T12:30:00+00:00",
+                "recipient": {
+                    "email": "user@example.com",
+                    "name": "user",
+                },
+            },
+        )
+    ]
+    
+    assert sender.sent==[
+        (
+            EmailRecipient(email="user@example.com", name="user"),
+            RenderedEmail(
+                subject="Confirm email",
+                html_body="<p>Confirm</p>",
+                text_body="Confirm",
+            ),
+        )
+    ]
